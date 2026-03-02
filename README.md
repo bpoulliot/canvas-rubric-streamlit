@@ -15,17 +15,22 @@ The application is production hardened, containerized, rate-limited, and memory-
 ## 🚀 Features
 
 ### Administrative Scope
-- Pull courses by:
-  - Subaccount
-  - Enrollment Term (auto-discovered)
-  - Entire Account
-- No instructor role verification required
+- Pull by Entire Account
+- Pull by Enrollment Term ID
+- Root account confirmation safeguard (must confirm when pulling from root account)
 - Designed for Canvas Admin API tokens
+
+### Safety Controls
+- Course count preview
+- Estimated execution time
+- Graceful cancellation button
+- Downloadable error log CSV
 
 ### Performance & Scale
 - Parallel processing (configurable worker count)
 - Thread-safe rate limiting
 - Exponential backoff retry logic
+- Real-time API rate monitor
 - Memory-safe streaming CSV export
 - Designed for 1000+ course environments
 
@@ -44,6 +49,16 @@ Automatically skips:
 - Resource limits enforced
 - Healthcheck enabled
 - No token persistence to disk
+
+---
+
+## 🛑 Important Warning
+
+Pulling rubric data for **Root Account (ID 1)** will attempt to extract data from every course in the account and all subaccounts.
+
+This is not recommended for large institutions.
+
+Always prefer limiting extraction by **Enrollment Term ID**.
 
 ---
 
@@ -106,37 +121,27 @@ http://your-server-ip:8501
 ### Container Hardening
 
 * Non-root user
-* Read-only filesystem
 * `no-new-privileges`
 * Resource limits (CPU & memory)
 * Temporary files stored in tmpfs
-* Healthcheck enabled
 
 ---
 
-## ⚙️ Usage
+## 📊 Execution Workflow
 
-1. Enter your Canvas base URL
-   Example:
-   `https://school.instructure.com`
-
-2. Paste your Canvas Admin API token
-
-3. Enter Account ID (typically `1`)
-
-4. Choose course scope:
-
-   * Subaccount
-   * Term
-   * Entire Account
-
-5. Select term or subaccount (auto-discovered)
-
-6. Adjust parallel worker count if needed
-
-7. Click **Run Extraction**
-
-8. Download the generated CSV
+1. Enter Canvas Base URL
+2. Paste Admin API Token
+3. Enter Account ID
+4. Choose:
+   - Entire Account
+   - Term (Enter Term ID)
+5. Preview Eligible Course Count
+6. Review Estimated Runtime
+7. Confirm if Root Account
+8. Run Extraction
+9. Download:
+   - Rubric CSV
+   - Error Log (if applicable)
 
 ---
 
@@ -154,6 +159,17 @@ The CSV contains:
 | criterion_id    | Rubric criterion ID |
 | score           | Points awarded      |
 | comments        | Rubric comments     |
+
+---
+
+## ⏱ Runtime Estimates
+
+Estimated at ~2.5 seconds per course.
+
+Actual runtime depends on:
+- Number of assignments
+- Number of submissions
+- Canvas API responsiveness
 
 ---
 
@@ -219,7 +235,6 @@ streamlit run app.py
 
 * This tool requires a Canvas Admin API token.
 * Ensure your token has permission to:
-
   * View courses
   * View assignments
   * View submissions
@@ -249,15 +264,3 @@ For larger institutional deployments, consider:
 
 Internal administrative tool.
 Review institutional data policies before deployment.
-
----
-
-## 🤝 Contributing
-
-Improvements welcome:
-
-* Rubric analytics dashboard
-* Department-level grouping
-* Instructor comparison
-* Rubric alignment reporting
-* Database export mode
