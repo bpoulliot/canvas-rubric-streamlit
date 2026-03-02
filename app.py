@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import time
 import pandas as pd
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.canvas_client import CanvasClient
@@ -16,7 +17,7 @@ st.set_page_config(page_title="Canvas Admin Rubric Extractor", layout="wide")
 st.title("Canvas Admin Rubric Extractor")
 
 # ---------------------------------------------------
-# Session State
+# Session State Initialization
 # ---------------------------------------------------
 
 for key in [
@@ -48,74 +49,41 @@ selected_account_id = None
 selected_term_id = None
 
 # ---------------------------------------------------
-# Entire Account Mode: Auto-load Accounts
+# Load Accounts (Entire Account OR Term)
 # ---------------------------------------------------
 
-if pull_type == "Entire Account":
+if base_url and api_key and not st.session_state.accounts_loaded:
+    try:
+        canvas_client = CanvasClient(base_url, api_key)
+        course_service = CourseService(canvas_client)
 
-    if base_url and api_key and not st.session_state.accounts_loaded:
+        with st.spinner("Loading accounts and subaccounts..."):
+            accounts = course_service.get_all_accounts()
 
-        try:
-            canvas_client = CanvasClient(base_url, api_key)
-            course_service = CourseService(canvas_client)
+        st.session_state.accounts_dict = {
+            f"{a.name} (ID: {a.id})": a.id for a in accounts
+        }
 
-            with st.spinner("Loading accounts and subaccounts..."):
-                accounts = course_service.get_all_accounts()
+        st.session_state.accounts_loaded = True
 
-            if not accounts:
-                st.error("No accessible accounts found for this API token.")
-                st.stop()
+    except Exception as e:
+        st.error(f"Failed to load accounts: {str(e)}")
+        st.stop()
 
-            st.session_state.accounts_dict = {
-                f"{a.name} (ID: {a.id})": a.id for a in accounts
-            }
-
-            st.session_state.accounts_loaded = True
-
-        except Exception as e:
-            st.error(f"Failed to load accounts: {str(e)}")
-            st.stop()
-
-    if st.session_state.accounts_loaded:
-        selected_account_label = st.selectbox(
-            "Select Account or Subaccount",
-            list(st.session_state.accounts_dict.keys())
-        )
-        selected_account_id = st.session_state.accounts_dict[selected_account_label]
+if st.session_state.accounts_loaded:
+    selected_account_label = st.selectbox(
+        "Select Account or Subaccount",
+        list(st.session_state.accounts_dict.keys())
+    )
+    selected_account_id = st.session_state.accounts_dict[selected_account_label]
 
 # ---------------------------------------------------
-# Term Mode: Load Terms Under Selected Root Account
+# Load Terms (If Term Selected)
 # ---------------------------------------------------
 
-if pull_type == "Term":
+if pull_type == "Term" and selected_account_id:
 
-    if base_url and api_key and not st.session_state.accounts_loaded:
-
-        try:
-            canvas_client = CanvasClient(base_url, api_key)
-            course_service = CourseService(canvas_client)
-
-            with st.spinner("Loading accessible accounts..."):
-                accounts = course_service.get_all_accounts()
-
-            st.session_state.accounts_dict = {
-                f"{a.name} (ID: {a.id})": a.id for a in accounts
-            }
-
-            st.session_state.accounts_loaded = True
-
-        except Exception as e:
-            st.error(str(e))
-            st.stop()
-
-    if st.session_state.accounts_loaded:
-        selected_account_label = st.selectbox(
-            "Select Account",
-            list(st.session_state.accounts_dict.keys())
-        )
-        selected_account_id = st.session_state.accounts_dict[selected_account_label]
-
-    if selected_account_id and not st.session_state.terms_loaded:
+    if not st.session_state.terms_loaded:
         try:
             canvas_client = CanvasClient(base_url, api_key)
             course_service = CourseService(canvas_client)
@@ -139,6 +107,46 @@ if pull_type == "Term":
             list(st.session_state.terms_dict.keys())
         )
         selected_term_id = st.session_state.terms_dict[selected_term_label]
+
+# ---------------------------------------------------
+# AUTO Course Count + Time Estimate
+# Only when:
+# - Term selected
+# - Account ID != 1
+# ---------------------------------------------------
+
+if (
+    pull_type == "Term"
+    and selected_account_id
+    and selected_account_id != 1
+    and selected_term_id
+):
+
+    try:
+        canvas_client = CanvasClient(base_url, api_key)
+        course_service = CourseService(canvas_client)
+
+        courses_preview = course_service.get_courses(
+            account_id=selected_account_id,
+            pull_type="Term",
+            term_id=selected_term_id
+        )
+
+        courses_preview = course_service.filter_courses(courses_preview)
+
+        course_count = len(courses_preview)
+
+        # Estimate 2.5 seconds per course
+        estimated_seconds = int(course_count * 2.5)
+        estimated_time = str(timedelta(seconds=estimated_seconds))
+
+        st.info(
+            f"{course_count} courses selected which is estimated to take "
+            f"{estimated_time} (HH:MM:SS) to complete."
+        )
+
+    except Exception as e:
+        st.error(str(e))
 
 # ---------------------------------------------------
 # Cancellation Button
@@ -229,8 +237,9 @@ if st.button("Run Extraction"):
     with st.spinner("Streaming export..."):
         csv_path = stream_to_csv(record_generator())
 
-    runtime = round((time.time() - start_time) / 60, 2)
-    st.success(f"Export Complete (Runtime: {runtime} minutes)")
+    runtime = str(timedelta(seconds=int(time.time() - start_time)))
+
+    st.success(f"Export Complete (Runtime: {runtime})")
 
     with open(csv_path, "rb") as f:
         st.download_button(
