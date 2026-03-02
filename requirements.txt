@@ -1,8 +1,3 @@
-streamlit
-pandas
-canvasapi
-matplotlib
-plotly
-requests
-openai
-xlsxwriter
+streamlit==1.32.2
+canvasapi==3.2.0
+pandas==2.2.1
