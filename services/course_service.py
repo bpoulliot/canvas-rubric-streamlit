@@ -25,24 +25,19 @@ class CourseService:
         self.client = canvas_client
 
     # ---------------------------------------------------
-    # FAST Account Retrieval (No Course Enumeration)
+    # Account Retrieval
     # ---------------------------------------------------
 
     @retry()
     def get_all_accounts(self):
-        """
-        Efficiently retrieves all root accounts and subaccounts
-        without enumerating courses.
-        """
 
         global_rate_limiter.wait()
-
         root_accounts = list(self.client.canvas.get_accounts())
+
         all_accounts = []
 
         for root in root_accounts:
             all_accounts.append(root)
-
             try:
                 global_rate_limiter.wait()
                 subaccounts = list(root.get_subaccounts(recursive=True))
@@ -50,27 +45,16 @@ class CourseService:
             except Exception:
                 continue
 
-        # -----------------------------------------------
-        # Filter excluded terms
-        # -----------------------------------------------
-
         filtered_accounts = []
 
         for account in all_accounts:
             name_lower = account.name.lower()
-
             if any(term in name_lower for term in EXCLUDED_ACCOUNT_TERMS):
                 continue
-
             filtered_accounts.append(account)
-
-        # -----------------------------------------------
-        # Group + Order
-        # -----------------------------------------------
 
         def account_sort_key(account):
             name = account.name.lower()
-
             if "_college" in name:
                 group = 0
             elif ": college" in name or ": school" in name or ": cross" in name:
@@ -79,15 +63,45 @@ class CourseService:
                 group = 3
             else:
                 group = 2
-
             return (group, name)
 
         filtered_accounts.sort(key=account_sort_key)
-
         return filtered_accounts
 
     # ---------------------------------------------------
-    # Root Term Retrieval
+    # FAST COURSE COUNT (NEW)
+    # ---------------------------------------------------
+
+    @retry()
+    def count_courses(self, account_id, pull_type, term_id=None):
+        """
+        Fast course estimation.
+        Does NOT enumerate assignments.
+        Does NOT filter by rubric presence.
+        Only counts available courses.
+        """
+
+        global_rate_limiter.wait()
+        account = self.client.get_account(account_id)
+
+        if pull_type == "Term":
+            if not term_id:
+                raise ValueError("Term must be selected.")
+
+            courses = account.get_courses(
+                enrollment_term_id=term_id,
+                state=["available"]
+            )
+        else:
+            courses = account.get_courses(
+                state=["available"]
+            )
+
+        # Efficient generator count
+        return sum(1 for _ in courses)
+
+    # ---------------------------------------------------
+    # Root Terms
     # ---------------------------------------------------
 
     @retry()
@@ -116,20 +130,15 @@ class CourseService:
                     state=["available"]
                 )
 
-            elif pull_type == "Entire Account":
+            else:
                 courses = account.get_courses(
                     state=["available"]
                 )
 
-            else:
-                raise ValueError("Invalid pull_type")
-
             return list(courses)
 
         except ResourceDoesNotExist:
-            raise ValueError(
-                "Canvas returned 'Not Found'. Verify account access."
-            )
+            raise ValueError("Canvas returned 'Not Found'. Verify account access.")
 
     # ---------------------------------------------------
     # Course Filtering
@@ -140,7 +149,6 @@ class CourseService:
         filtered = []
 
         for course in courses:
-
             if course.workflow_state != "available":
                 continue
 
