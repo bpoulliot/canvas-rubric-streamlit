@@ -1,3 +1,5 @@
 streamlit==1.32.2
 canvasapi==3.2.0
 pandas==2.2.1
+plotly==5.22.0
+reportlab==4.2.0
