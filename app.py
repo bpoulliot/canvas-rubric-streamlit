@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import time
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -15,17 +15,20 @@ st.set_page_config(page_title="Canvas Admin Rubric Extractor", layout="wide")
 page = st.sidebar.radio("Navigation", ["Extraction", "Visualizations"])
 
 # ---------------------------------------------------
-# Session State Initialization
+# Session State
 # ---------------------------------------------------
 
 if "connected" not in st.session_state:
     st.session_state.connected = False
 
+if "canvas_client" not in st.session_state:
+    st.session_state.canvas_client = None
+
 if "accounts" not in st.session_state:
     st.session_state.accounts = []
 
-if "canvas_client" not in st.session_state:
-    st.session_state.canvas_client = None
+if "connection_timestamp" not in st.session_state:
+    st.session_state.connection_timestamp = None
 
 
 # ===================================================
@@ -40,7 +43,7 @@ if page == "Extraction":
     api_key = st.text_input("Paste Admin API Token", type="password")
 
     # ---------------------------------------------------
-    # CONNECTION STEP
+    # CONNECT STEP
     # ---------------------------------------------------
 
     if not st.session_state.connected:
@@ -64,6 +67,7 @@ if page == "Extraction":
                 st.session_state.canvas_client = canvas_client
                 st.session_state.accounts = accounts
                 st.session_state.connected = True
+                st.session_state.connection_timestamp = time.time()
 
                 st.success("Connected successfully.")
 
@@ -74,11 +78,30 @@ if page == "Extraction":
         st.stop()
 
     # ---------------------------------------------------
+    # Remove success message after 3 seconds
+    # ---------------------------------------------------
+
+    if st.session_state.connection_timestamp:
+        if time.time() - st.session_state.connection_timestamp < 3:
+            st.success("Connected successfully.")
+        else:
+            st.session_state.connection_timestamp = None
+
+    # ---------------------------------------------------
     # POST-CONNECTION UI
     # ---------------------------------------------------
 
     canvas_client = st.session_state.canvas_client
     course_service = CourseService(canvas_client)
+
+    pull_type = st.selectbox(
+        "Pull Courses By",
+        ["Term", "Entire Account"]
+    )
+
+    # ---------------------------------------------------
+    # ACCOUNT DROPDOWN
+    # ---------------------------------------------------
 
     account_dict = {
         f"{a.name} (ID: {a.id})": a.id
@@ -92,97 +115,115 @@ if page == "Extraction":
 
     selected_account_id = account_dict[selected_account_label]
 
-    pull_type = st.selectbox(
-        "Pull Courses By",
-        ["Entire Account", "Term"],
-        index=0
+    # ---------------------------------------------------
+    # ENROLLMENT TERM DROPDOWN (Always Required)
+    # ---------------------------------------------------
+
+    with st.spinner("Loading root enrollment terms..."):
+        terms = course_service.get_root_terms()
+
+    EXCLUDED_TERM_NAMES = [
+        "permanent term",
+        "default term",
+        "sandboxes for faculty",
+        "summer 2017 pilot courses",
+        "qm reviews"
+    ]
+
+    filtered_terms = [
+        t for t in terms
+        if t.name.lower() not in EXCLUDED_TERM_NAMES
+    ]
+
+    def sis_sort_key(term):
+        sis_id = getattr(term, "sis_term_id", None)
+        if sis_id and str(sis_id).isdigit():
+            return (0, -int(sis_id))
+        return (1, str(sis_id))
+
+    filtered_terms.sort(key=sis_sort_key)
+
+    term_dict = {
+        f"{t.name} (SIS ID: {getattr(t,'sis_term_id',None)})": t.id
+        for t in filtered_terms
+    }
+
+    selected_term_label = st.selectbox(
+        "Select Enrollment Term",
+        list(term_dict.keys())
     )
 
-    selected_term_id = None
+    selected_term_id = term_dict[selected_term_label]
 
     # ---------------------------------------------------
-    # TERM MODE
+    # CONDITIONAL LOGIC RULES
     # ---------------------------------------------------
 
+    valid_configuration = False
+
+    # Rule 2
     if pull_type == "Term":
+        if selected_account_id != 1:
+            valid_configuration = True
 
-        with st.spinner("Loading root enrollment terms..."):
-            terms = course_service.get_root_terms()
+        # Rule 5: Comment toggle appears ONLY in Term mode
+        include_comments = st.toggle("Pull Rubric Comments", value=False)
 
-        EXCLUDED_TERM_NAMES = [
-            "permanent term",
-            "default term",
-            "sandboxes for faculty",
-            "summer 2017 pilot courses",
-            "qm reviews"
-        ]
+    else:
+        include_comments = False
 
-        filtered_terms = [
-            t for t in terms
-            if t.name.lower() not in EXCLUDED_TERM_NAMES
-        ]
-
-        def sis_sort_key(term):
-            sis_id = getattr(term, "sis_term_id", None)
-            if sis_id and str(sis_id).isdigit():
-                return (0, -int(sis_id))
-            return (1, str(sis_id))
-
-        filtered_terms.sort(key=sis_sort_key)
-
-        term_dict = {
-            f"{t.name} (SIS ID: {getattr(t,'sis_term_id',None)})": t.id
-            for t in filtered_terms
-        }
-
-        selected_term_label = st.selectbox(
-            "Select Enrollment Term",
-            list(term_dict.keys())
-        )
-
-        selected_term_id = term_dict[selected_term_label]
-
-        # -----------------------------------------------
-        # Estimate Checkbox (ONLY when Term selected)
-        # -----------------------------------------------
-
+        # Rule 3: Entire Account requires enrollment term
         if selected_term_id:
+            valid_configuration = True
 
-            estimate_courses = st.checkbox("Estimate Eligible Courses")
+    # ---------------------------------------------------
+    # ESTIMATE COURSES (Rule 4)
+    # ---------------------------------------------------
 
-            if estimate_courses:
+    if valid_configuration:
 
-                with st.spinner("Estimating eligible courses..."):
+        estimate_courses = st.checkbox("Estimate Eligible Courses")
 
-                    preview_courses = course_service.get_courses(
-                        account_id=selected_account_id,
-                        pull_type="Term",
-                        term_id=selected_term_id
-                    )
+        if estimate_courses:
 
-                    preview_courses = course_service.filter_courses(preview_courses)
+            with st.spinner("Estimating eligible courses..."):
 
-                    course_count = len(preview_courses)
-                    estimated_seconds = int(course_count * 2.5)
-                    estimated_time = str(timedelta(seconds=estimated_seconds))
-
-                st.info(
-                    f"{course_count} courses selected which is estimated to take "
-                    f"{estimated_time} to complete."
+                courses_preview = course_service.get_courses(
+                    account_id=selected_account_id,
+                    pull_type=pull_type,
+                    term_id=selected_term_id
                 )
 
+                courses_preview = course_service.filter_courses(courses_preview)
+
+                course_count = len(courses_preview)
+
+                estimated_seconds = int(course_count * 2.5)
+                estimated_time = str(timedelta(seconds=estimated_seconds))
+
+            st.info(
+                f"{course_count} courses selected which is estimated to take "
+                f"{estimated_time} to complete."
+            )
+
     # ---------------------------------------------------
-    # RUBRIC COMMENT TOGGLE + WORKERS
+    # RUN EXTRACTION BUTTON (Rule 6)
     # ---------------------------------------------------
 
-    include_comments = st.toggle("Pull Rubric Comments", value=False)
     max_workers = st.slider("Parallel Workers", 2, 20, 10)
 
-    # ---------------------------------------------------
-    # RUN EXTRACTION
-    # ---------------------------------------------------
+    extraction_ready = (
+        base_url
+        and api_key
+        and valid_configuration
+    )
 
-    if st.button("Run Extraction"):
+    run_clicked = st.button(
+        "Run Extraction",
+        disabled=not extraction_ready
+    )
+
+    if run_clicked:
 
         rubric_service = RubricService()
 
@@ -236,45 +277,3 @@ if page == "Extraction":
             file_name="canvas_admin_rubrics.csv",
             mime="text/csv"
         )
-
-
-# ===================================================
-# VISUALIZATIONS PAGE
-# ===================================================
-
-if page == "Visualizations":
-
-    st.title("Rubric Visualizations")
-
-    if "rubric_df" not in st.session_state:
-        st.warning("No rubric data available. Run Extraction first.")
-        st.stop()
-
-    df = st.session_state["rubric_df"]
-
-    tab1, tab2 = st.tabs(["Heatmap", "Raw Data"])
-
-    with tab1:
-        heatmap_data = (
-            df.groupby(["course_name", "criterion_name"])["score"]
-            .mean()
-            .reset_index()
-        )
-
-        pivot = heatmap_data.pivot(
-            index="course_name",
-            columns="criterion_name",
-            values="score"
-        )
-
-        fig = px.imshow(
-            pivot,
-            text_auto=True,
-            aspect="auto",
-            title="Average Score Heatmap"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with tab2:
-        st.dataframe(df, use_container_width=True)
