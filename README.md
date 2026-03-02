@@ -1,266 +1,358 @@
 # Canvas Admin Rubric Extractor
 
-Enterprise-grade Streamlit application for extracting rubric assessment data across a Canvas LMS account using an Administrator API token.
+Enterprise-grade Streamlit application for extracting, analyzing, and reporting on Canvas LMS rubric assessment data at scale.
 
-This tool allows Canvas administrators to pull rubric scoring data across:
+This tool is designed for Canvas administrators and institutional research teams who require:
 
-- A single Subaccount
-- A single Enrollment Term
-- An entire Canvas Account
-
-The application is production hardened, containerized, rate-limited, and memory-safe for large institutional datasets.
-
----
-
-## 🚀 Features
-
-### Administrative Scope
-- Pull by Entire Account
-- Pull by Enrollment Term ID
-- Root account confirmation safeguard (must confirm when pulling from root account)
-- Designed for Canvas Admin API tokens
-
-### Safety Controls
-- Course count preview
-- Estimated execution time
-- Graceful cancellation button
-- Downloadable error log CSV
-
-### Performance & Scale
-- Parallel processing (configurable worker count)
-- Thread-safe rate limiting
-- Exponential backoff retry logic
-- Real-time API rate monitor
-- Memory-safe streaming CSV export
-- Designed for 1000+ course environments
-
-### Course Filtering
-Automatically skips:
-- Unpublished courses
-- Courses with no assignments
-- Assignments without rubrics
-- Submissions without graded rubric assessments
-
-### Security & Hardening
-- Canvas token pasted per run (never stored)
-- Non-root Docker container
-- Read-only filesystem
-- No new privileges
-- Resource limits enforced
-- Healthcheck enabled
-- No token persistence to disk
+* Governed account scoping
+* Root-level term enforcement
+* FERPA-compliant exports
+* Comment scrubbing
+* Advanced visual analytics
+* Executive PDF reporting
 
 ---
 
-## 🛑 Important Warning
+# 🚀 Core Capabilities
 
-Pulling rubric data for **Root Account (ID 1)** will attempt to extract data from every course in the account and all subaccounts.
+## Extraction Modes
 
-This is not recommended for large institutions.
+### Pull Courses By:
 
-Always prefer limiting extraction by **Enrollment Term ID**.
+* **Entire Account**
+* **Enrollment Term**
 
 ---
 
-## 📁 Project Structure
+## 🔐 Governance & Safety Controls
+
+### Root-Only Term Enforcement
+
+When "Pull Courses By = Term":
+
+* Enrollment terms are loaded **only from the root account (ID = 1)**
+* Subaccount term loading is disabled
+* Prevents term scope ambiguity
+
+---
+
+### Enrollment Term Filtering
+
+The following terms are automatically excluded from the dropdown:
+
+* Permanent term
+* Default Term
+* Sandboxes for faculty
+* Summer 2017 pilot courses
+* QM Reviews
+
+Filtering is case-insensitive.
+
+---
+
+### Term Ordering Logic
+
+Terms are sorted by:
+
+1. Descending numerical SIS ID (most recent first)
+2. Non-numeric SIS IDs appear last
+
+Dropdown display format:
+
 ```
-canvas-admin-rubric/
-│
-├── app.py
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-│
-├── services/
-│   ├── canvas_client.py
-│   ├── course_service.py
-│   ├── rubric_service.py
-│
-├── processors/
-│   └── rubric_processor.py
-│
-└── utils/
-├── rate_limiter.py
-├── retry.py
-├── streaming_export.py
+Term Name (SIS ID: XXXXX)
 ```
+
 ---
 
-## 🐳 Deployment (Docker)
+### Account Filtering
 
-### 1️⃣ Build the Container
+Accounts are excluded if their name contains (case-insensitive):
+
+* blueprint
+* @uccs.edu
+* canvas demo courses
+* self-enroll
+* committees
+* templates
+* zoom testing
+* manually
+* permanent
+* special
+* no announcements
+
+---
+
+### Account Ordering Logic
+
+Accounts are ordered using the following grouping:
+
+1. Accounts containing `_college`
+2. All other accounts
+3. Accounts containing `archive`
+
+Within each group: alphabetical (case-insensitive)
+
+---
+
+# 🧾 Rubric Data Extraction
+
+Extracted fields include:
+
+| Column                | Description                    |
+| --------------------- | ------------------------------ |
+| course_name           | Canvas course name             |
+| assignment_name       | Assignment name                |
+| rubric_name           | Rubric title                   |
+| criterion_name        | Criterion display name         |
+| criterion_description | Detailed criterion description |
+| score                 | Points awarded                 |
+| rubric_comment        | Scrubbed comment (if enabled)  |
+
+---
+
+## 🔒 FERPA Compliance
+
+The export will **never include**:
+
+* student_id
+* user_id
+* student_name
+* criterion_id
+
+---
+
+# 💬 Optional Rubric Comment Extraction
+
+Toggle: **Pull Rubric Comments**
+
+### OFF
+
+* No comments retrieved
+
+### ON
+
+* Retrieves all rubric comments
+* Automatically scrubs:
+
+  * Student first names
+  * Student last names
+* Case-insensitive whole-word replacement
+* Replaces detected names with:
+
+```
+[REDACTED]
+```
+
+---
+
+# 📊 Visualization Dashboard
+
+Navigate to **Visualizations** in the sidebar.
+
+---
+
+## 🔥 Heatmap
+
+* Criterion × Course average score heatmap
+* Quickly identify strengths and weaknesses
+* Color-coded performance
+
+---
+
+## 📈 Statistical Variance Analysis
+
+Includes:
+
+* Mean
+* Median
+* Standard Deviation
+* Variance
+* Coefficient of Variation
+* Boxplot distribution
+
+---
+
+## 🏆 Benchmarking Dashboard
+
+Provides:
+
+* Global average score
+* Course-level comparison
+* Ranked performance table
+* Visual course vs global comparison chart
+
+---
+
+## 🧠 Filtering Controls
+
+* Filter by course
+* Filter by term (if present)
+* Dynamic updates across all visualizations
+
+---
+
+# 📄 Exportable PDF Report Builder
+
+From the Visualizations page:
+
+Generate a structured executive report including:
+
+* Title page
+* Timestamp
+* Global statistics
+* Course benchmarking table
+* Clean formatted layout
+
+Exported as:
+
+```
+canvas_rubric_report.pdf
+```
+
+---
+
+# ⚡ Performance & Scaling
+
+## Parallel Processing
+
+* Configurable worker count (2–20)
+* ThreadPoolExecutor-based
+
+## Dynamic Runtime Estimation
+
+During extraction:
+
+Displays:
+
+* % complete
+* Elapsed time
+* ETA remaining
+* Estimated completion clock
+
+Estimates dynamically adjust based on actual course processing time.
+
+---
+
+## Streaming-Safe Architecture
+
+* Handles large institutional datasets
+* Avoids loading unnecessary objects into memory
+* Safe for 1000+ course environments
+
+---
+
+# 🐳 Docker Deployment
+
+## Build
 
 ```bash
 docker compose build
-````
+```
 
-### 2️⃣ Start the Application
+## Run
 
 ```bash
 docker compose up -d
 ```
 
-### 3️⃣ Access the App
+Access at:
 
 ```
-http://your-server-ip:8501
+http://<server-ip>:8501
 ```
 
 ---
 
-## 🔐 Security Model
+# 🔐 Security Model
 
-### Canvas API Token Handling
-
-* Token is pasted into the Streamlit UI
-* Token is used in memory only
-* Token is not written to disk
-* Token is not cached
-* Token is cleared after run
-
-### Container Hardening
-
-* Non-root user
-* `no-new-privileges`
-* Resource limits (CPU & memory)
-* Temporary files stored in tmpfs
+* API token pasted per run
+* Token never stored
+* Token cleared after execution
+* Non-root container
+* Read-only filesystem
+* No new privileges
+* Resource limits enforced
+* Healthcheck enabled
 
 ---
 
-## 📊 Execution Workflow
+# 📈 Recommended Usage
 
-1. Enter Canvas Base URL
-2. Paste Admin API Token
-3. Enter Account ID
-4. Choose:
-   - Entire Account
-   - Term (Enter Term ID)
-5. Preview Eligible Course Count
-6. Review Estimated Runtime
-7. Confirm if Root Account
-8. Run Extraction
-9. Download:
-   - Rubric CSV
-   - Error Log (if applicable)
+For institutional environments:
+
+* Prefer "Term" extraction over full account
+* Use SIS ID ordering to select most recent term
+* Avoid root-level full extraction unless necessary
+* Use comment toggle only when required
 
 ---
 
-## 📊 Output Format
+# 📦 Example Use Cases
 
-The CSV contains:
-
-| Column          | Description         |
-| --------------- | ------------------- |
-| course_id       | Canvas course ID    |
-| course_name     | Course name         |
-| assignment_id   | Assignment ID       |
-| assignment_name | Assignment name     |
-| student_id      | Canvas user ID      |
-| criterion_id    | Rubric criterion ID |
-| score           | Points awarded      |
-| comments        | Rubric comments     |
-
----
-
-## ⏱ Runtime Estimates
-
-Estimated at ~2.5 seconds per course.
-
-Actual runtime depends on:
-- Number of assignments
-- Number of submissions
-- Canvas API responsiveness
-
----
-
-## 🧠 Performance Guidance
-
-Recommended parallel workers:
-
-| Environment Size | Workers |
-| ---------------- | ------- |
-| < 200 courses    | 5–8     |
-| 200–1000 courses | 8–15    |
-| 1000+ courses    | 15–20   |
-
-Rate limiting is enabled at 8 API calls per second to avoid Canvas throttling.
-
----
-
-## 🏫 Designed For
-
-* District-wide rubric audits
-* University-level rubric analysis
-* Department benchmarking
-* Accreditation documentation
-* Compliance reporting
+* Accreditation audits
 * Rubric consistency analysis
+* Department benchmarking
+* Institutional quality review
+* Criterion variance analysis
+* Faculty development insights
+* Program-level reporting
 
 ---
 
-## 🔄 Rate Limiting & Retry
+# 🧠 Architecture Overview
 
-This application includes:
-
-* Global thread-safe rate limiter
-* Exponential backoff retry (max 5 attempts)
-* Automatic handling of transient API errors
-
----
-
-## 🛡 Recommended Production Practices
-
-* Run behind reverse proxy (Nginx or Traefik)
-* Restrict IP access via firewall
-* Rotate Canvas admin tokens quarterly
-* Monitor container resource usage
-* Use HTTPS in production
+* Streamlit frontend
+* CanvasAPI backend integration
+* Root-scoped term governance
+* Structured account filtering
+* Privacy-safe comment scrubbing
+* Plotly analytics engine
+* ReportLab PDF reporting
 
 ---
 
-## 🧪 Local Development (Without Docker)
+# ⚠️ Operational Notes
 
-Create virtual environment:
+* Large term extractions may take significant time
+* Parallel workers increase speed but also increase API load
+* Ensure API token has:
 
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
-
----
-
-## ⚠️ Important Notes
-
-* This tool requires a Canvas Admin API token.
-* Ensure your token has permission to:
-  * View courses
-  * View assignments
-  * View submissions
-  * View rubric assessments
-* Large environments may take time depending on dataset size.
+  * Account-level permissions
+  * Rubric visibility
+  * Enrollment term access
 
 ---
 
-## 📈 Scalability
+# 🔮 Future Enhancement Roadmap
 
-Tested design supports:
+Potential enhancements include:
 
-* 100 courses — very fast
-* 1,000 courses — stable
-* 5,000+ courses — safe via streaming export
-
-For larger institutional deployments, consider:
-
-* Redis queue architecture
-* Database persistence layer
-* Async API client
-* Kubernetes scaling
+* Instructor-level benchmarking
+* Criterion-level benchmarking across departments
+* Z-score normalization
+* Longitudinal term comparison
+* Outlier detection engine
+* Confidence interval analysis
+* NLP-based comment clustering
+* Institutional branding in PDF
+* Automated scheduled reporting
+* Kubernetes deployment support
 
 ---
 
-## 📜 License
+# 🏫 Designed For
+
+* Universities
+* Community colleges
+* Multi-campus systems
+* Statewide systems
+* Institutional research teams
+* Academic affairs offices
+
+---
+
+# License
 
 Internal administrative tool.
-Review institutional data policies before deployment.
+Ensure compliance with institutional data governance policies before deployment.
