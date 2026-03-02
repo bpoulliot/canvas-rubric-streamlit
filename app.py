@@ -174,36 +174,32 @@ if page == "Extraction":
         # ESTIMATE COURSES (WITH PROGRESS)
         # ---------------------------------------------------
 
+# ---------------------------------------------------
+# FAST ESTIMATE COURSES
+# ---------------------------------------------------
+
         if valid_configuration:
-
+        
             estimate_courses = st.checkbox("Estimate Eligible Courses")
-
+        
             if estimate_courses:
-
+        
                 with st.spinner("Estimating eligible courses..."):
-
-                    preview_courses = course_service.get_courses(
+        
+                    progress_bar = st.progress(0)
+        
+                    # Count courses only (fast)
+                    course_count = course_service.count_courses(
                         account_id=selected_account_id,
                         pull_type=pull_type,
                         term_id=selected_term_id
                     )
-
-                    progress_bar = st.progress(0)
-
-                    filtered_preview = []
-                    total_preview = len(preview_courses)
-
-                    for i, course in enumerate(preview_courses):
-                        filtered_preview.extend(
-                            course_service.filter_courses([course])
-                        )
-                        progress_bar.progress((i + 1) / total_preview)
-
-                    course_count = len(filtered_preview)
-
+        
+                    progress_bar.progress(1.0)
+        
                     estimated_seconds = int(course_count * 2.5)
                     estimated_time = str(timedelta(seconds=estimated_seconds))
-
+        
                 st.info(
                     f"{course_count} courses selected which is estimated to take "
                     f"{estimated_time} to complete."
