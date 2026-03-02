@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import time
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -64,13 +63,14 @@ if page == "Extraction":
                     st.session_state.accounts = accounts
                     st.session_state.connected = True
 
-                    st.success("Connected successfully.")
+                    # Critical: force clean rerun into extraction view
+                    st.rerun()
 
                 except Exception as e:
                     st.error(f"Connection failed: {str(e)}")
 
     # ===================================================
-    # EXTRACTION VIEW (POST-CONNECTION)
+    # EXTRACTION VIEW
     # ===================================================
 
     else:
@@ -78,7 +78,7 @@ if page == "Extraction":
         canvas_client = st.session_state.canvas_client
         course_service = CourseService(canvas_client)
 
-        # Optional disconnect
+        # Disconnect Button
         col1, col2 = st.columns([8, 2])
         with col2:
             if st.button("Disconnect"):
@@ -113,7 +113,7 @@ if page == "Extraction":
         selected_account_id = account_dict[selected_account_label]
 
         # ---------------------------------------------------
-        # Enrollment Terms (Root Only)
+        # Enrollment Term Dropdown (Root Only)
         # ---------------------------------------------------
 
         with st.spinner("Loading root enrollment terms..."):
@@ -180,7 +180,7 @@ if page == "Extraction":
                 valid_configuration = True
 
         # ---------------------------------------------------
-        # Estimate Toggle (Executed After Run Click)
+        # Estimate Toggle (runs after click)
         # ---------------------------------------------------
 
         estimate_toggle = st.toggle("Estimate Eligible Courses", value=False)
@@ -199,21 +199,18 @@ if page == "Extraction":
         if st.button("Run Extraction", disabled=not extraction_ready):
 
             # -----------------------------------------------
-            # Fast Estimation (After Click)
+            # Fast Estimation (after click)
             # -----------------------------------------------
 
             if estimate_toggle:
 
                 with st.spinner("Estimating eligible courses..."):
-                    progress = st.progress(0)
 
                     course_count = course_service.count_courses(
                         account_id=selected_account_id,
                         pull_type=pull_type,
                         term_id=selected_term_id
                     )
-
-                    progress.progress(1.0)
 
                     estimated_seconds = int(course_count * 2.5)
                     estimated_time = str(timedelta(seconds=estimated_seconds))
