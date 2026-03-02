@@ -2,209 +2,109 @@ import streamlit as st
 import os
 import time
 import pandas as pd
-from datetime import timedelta
+import plotly.express as px
+from datetime import timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle
+)
+from reportlab.lib import colors
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
 
 from services.canvas_client import CanvasClient
 from services.course_service import CourseService
 from services.rubric_service import RubricService
 from processors.rubric_processor import RubricProcessor
 from utils.streaming_export import stream_to_csv
-from utils.rate_limiter import global_rate_limiter
 
 
 st.set_page_config(page_title="Canvas Admin Rubric Extractor", layout="wide")
-st.title("Canvas Admin Rubric Extractor")
 
-# ---------------------------------------------------
-# Session State Initialization
-# ---------------------------------------------------
-
-for key in [
-    "cancel_requested",
-    "terms_loaded",
-    "accounts_loaded",
-    "terms_dict",
-    "accounts_dict"
-]:
-    if key not in st.session_state:
-        st.session_state[key] = False if "loaded" in key or "cancel" in key else {}
-
-# ---------------------------------------------------
-# Core Inputs
-# ---------------------------------------------------
-
-base_url = st.text_input("Canvas Base URL")
-api_key = st.text_input("Paste Admin API Token (Used Once)", type="password")
-
-pull_type = st.selectbox(
-    "Pull Courses By",
-    ["Entire Account", "Term"],
-    index=0
+page = st.sidebar.radio(
+    "Navigation",
+    ["Extraction", "Visualizations"]
 )
 
-max_workers = st.slider("Parallel Workers", 2, 20, 10)
+# ===================================================
+# EXTRACTION PAGE
+# ===================================================
 
-selected_account_id = None
-selected_term_id = None
+if page == "Extraction":
 
-# ---------------------------------------------------
-# Load Accounts (Entire Account OR Term)
-# ---------------------------------------------------
+    st.title("Canvas Admin Rubric Extractor")
 
-if base_url and api_key and not st.session_state.accounts_loaded:
-    try:
+    base_url = st.text_input("Canvas Base URL")
+    api_key = st.text_input("Paste Admin API Token (Used Once)", type="password")
+
+    pull_type = st.selectbox(
+        "Pull Courses By",
+        ["Entire Account", "Term"],
+        index=0
+    )
+
+    max_workers = st.slider("Parallel Workers", 2, 20, 10)
+
+    selected_account_id = None
+    selected_term_id = None
+
+    if base_url and api_key:
+
         canvas_client = CanvasClient(base_url, api_key)
         course_service = CourseService(canvas_client)
 
-        with st.spinner("Loading accounts and subaccounts..."):
-            accounts = course_service.get_all_accounts()
+        accounts = course_service.get_all_accounts()
 
-        st.session_state.accounts_dict = {
+        account_dict = {
             f"{a.name} (ID: {a.id})": a.id for a in accounts
         }
 
-        st.session_state.accounts_loaded = True
+        selected_account_label = st.selectbox(
+            "Select Account or Subaccount",
+            list(account_dict.keys())
+        )
 
-    except Exception as e:
-        st.error(f"Failed to load accounts: {str(e)}")
-        st.stop()
+        selected_account_id = account_dict[selected_account_label]
 
-if st.session_state.accounts_loaded:
-    selected_account_label = st.selectbox(
-        "Select Account or Subaccount",
-        list(st.session_state.accounts_dict.keys())
-    )
-    selected_account_id = st.session_state.accounts_dict[selected_account_label]
+        if pull_type == "Term":
 
-# ---------------------------------------------------
-# Load Terms (If Term Selected)
-# ---------------------------------------------------
+            terms = course_service.get_terms(selected_account_id)
 
-if pull_type == "Term" and selected_account_id:
-
-    if not st.session_state.terms_loaded:
-        try:
-            canvas_client = CanvasClient(base_url, api_key)
-            course_service = CourseService(canvas_client)
-
-            with st.spinner("Loading enrollment terms..."):
-                terms = course_service.get_terms(selected_account_id)
-
-            st.session_state.terms_dict = {
+            term_dict = {
                 f"{t.name} (ID: {t.id})": t.id for t in terms
             }
 
-            st.session_state.terms_loaded = True
+            selected_term_label = st.selectbox(
+                "Select Enrollment Term",
+                list(term_dict.keys())
+            )
 
-        except Exception as e:
-            st.error(str(e))
-            st.stop()
+            selected_term_id = term_dict[selected_term_label]
 
-    if st.session_state.terms_loaded:
-        selected_term_label = st.selectbox(
-            "Select Enrollment Term",
-            list(st.session_state.terms_dict.keys())
-        )
-        selected_term_id = st.session_state.terms_dict[selected_term_label]
+    if st.button("Run Extraction"):
 
-# ---------------------------------------------------
-# AUTO Course Count + Time Estimate
-# Only when:
-# - Term selected
-# - Account ID != 1
-# ---------------------------------------------------
+        rubric_service = RubricService()
 
-if (
-    pull_type == "Term"
-    and selected_account_id
-    and selected_account_id != 1
-    and selected_term_id
-):
-
-    try:
-        canvas_client = CanvasClient(base_url, api_key)
-        course_service = CourseService(canvas_client)
-
-        courses_preview = course_service.get_courses(
+        courses = course_service.get_courses(
             account_id=selected_account_id,
-            pull_type="Term",
+            pull_type=pull_type,
             term_id=selected_term_id
         )
 
-        courses_preview = course_service.filter_courses(courses_preview)
+        courses = course_service.filter_courses(courses)
 
-        course_count = len(courses_preview)
+        total = len(courses)
+        st.info(f"{total} eligible courses found.")
 
-        # Estimate 2.5 seconds per course
-        estimated_seconds = int(course_count * 2.5)
-        estimated_time = str(timedelta(seconds=estimated_seconds))
+        records = []
 
-        st.info(
-            f"{course_count} courses selected which is estimated to take "
-            f"{estimated_time} (HH:MM:SS) to complete."
-        )
-
-    except Exception as e:
-        st.error(str(e))
-
-# ---------------------------------------------------
-# Cancellation Button
-# ---------------------------------------------------
-
-if st.button("Cancel Extraction"):
-    st.session_state.cancel_requested = True
-
-# ---------------------------------------------------
-# Run Extraction
-# ---------------------------------------------------
-
-if st.button("Run Extraction"):
-
-    if not base_url or not api_key:
-        st.error("Base URL and API Token required.")
-        st.stop()
-
-    if not selected_account_id:
-        st.error("Please select an Account.")
-        st.stop()
-
-    if pull_type == "Term" and not selected_term_id:
-        st.error("Please select an Enrollment Term.")
-        st.stop()
-
-    st.session_state.cancel_requested = False
-
-    canvas_client = CanvasClient(base_url, api_key)
-    course_service = CourseService(canvas_client)
-    rubric_service = RubricService()
-
-    try:
-        with st.spinner("Retrieving courses..."):
-            courses = course_service.get_courses(
-                account_id=selected_account_id,
-                pull_type=pull_type,
-                term_id=selected_term_id
-            )
-            courses = course_service.filter_courses(courses)
-
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
-
-    if not courses:
-        st.warning("No eligible courses found.")
-        st.stop()
-
-    st.success(f"{len(courses)} eligible courses.")
-
-    progress = st.progress(0)
-    total = len(courses)
-    failed_courses = []
-    start_time = time.time()
-
-    def record_generator():
-        completed = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
@@ -213,56 +113,183 @@ if st.button("Run Extraction"):
             }
 
             for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    records.extend(result)
 
-                if st.session_state.cancel_requested:
-                    st.warning("Extraction cancelled.")
-                    break
+        df = pd.DataFrame(records)
+        st.session_state["rubric_df"] = df
 
-                course = futures[future]
+        st.success("Extraction complete")
 
-                try:
-                    records = future.result()
-                    for record in records:
-                        yield record
-                except Exception as e:
-                    failed_courses.append({
-                        "course_id": course.id,
-                        "course_name": course.name,
-                        "error": str(e)
-                    })
-
-                completed += 1
-                progress.progress(completed / total)
-
-    with st.spinner("Streaming export..."):
-        csv_path = stream_to_csv(record_generator())
-
-    runtime = str(timedelta(seconds=int(time.time() - start_time)))
-
-    st.success(f"Export Complete (Runtime: {runtime})")
-
-    with open(csv_path, "rb") as f:
         st.download_button(
             "Download CSV",
-            f,
+            df.to_csv(index=False).encode("utf-8"),
             file_name="canvas_admin_rubrics.csv",
             mime="text/csv"
         )
 
-    os.remove(csv_path)
+# ===================================================
+# VISUALIZATION PAGE
+# ===================================================
 
-    if failed_courses:
-        df_fail = pd.DataFrame(failed_courses)
+if page == "Visualizations":
 
-        with st.expander("⚠️ Failed Courses Log"):
-            st.dataframe(df_fail)
+    st.title("Rubric Visualizations")
 
-            csv_fail = df_fail.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Download Error Log",
-                csv_fail,
-                file_name="canvas_admin_rubric_errors.csv",
-                mime="text/csv"
+    if "rubric_df" not in st.session_state:
+        st.warning("No rubric data available. Run Extraction first.")
+        st.stop()
+
+    df = st.session_state["rubric_df"]
+
+    tab1, tab2, tab3 = st.tabs([
+        "Heatmap",
+        "Benchmarking",
+        "PDF Report"
+    ])
+
+    # ------------------------------------------------
+    # HEATMAP
+    # ------------------------------------------------
+
+    with tab1:
+        heatmap_data = (
+            df.groupby(["course_name", "criterion_id"])["score"]
+            .mean()
+            .reset_index()
+        )
+
+        pivot = heatmap_data.pivot(
+            index="course_name",
+            columns="criterion_id",
+            values="score"
+        )
+
+        fig = px.imshow(
+            pivot,
+            text_auto=True,
+            aspect="auto",
+            title="Average Score Heatmap"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ------------------------------------------------
+    # BENCHMARKING
+    # ------------------------------------------------
+
+    with tab2:
+        global_average = df["score"].mean()
+
+        course_avg = (
+            df.groupby("course_name")["score"]
+            .mean()
+            .reset_index()
+            .sort_values("score", ascending=False)
+        )
+
+        st.metric("Global Average Score", round(global_average, 2))
+
+        fig = px.bar(
+            course_avg,
+            x="course_name",
+            y="score",
+            title="Course Average vs Global Average"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ------------------------------------------------
+    # PDF REPORT BUILDER
+    # ------------------------------------------------
+
+    with tab3:
+
+        st.subheader("Generate Executive PDF Report")
+
+        if st.button("Generate PDF Report"):
+
+            pdf_path = "rubric_report.pdf"
+            doc = SimpleDocTemplate(pdf_path, pagesize=letter)
+            elements = []
+
+            styles = getSampleStyleSheet()
+            title_style = styles["Heading1"]
+            normal_style = styles["Normal"]
+
+            elements.append(Paragraph("Canvas Rubric Analytics Report", title_style))
+            elements.append(Spacer(1, 0.3 * inch))
+
+            elements.append(
+                Paragraph(
+                    f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    normal_style
+                )
             )
 
-    api_key = None
+            elements.append(Spacer(1, 0.3 * inch))
+
+            # Global Stats
+            mean_score = df["score"].mean()
+            std_dev = df["score"].std()
+            variance = df["score"].var()
+
+            elements.append(Paragraph("Global Statistics", styles["Heading2"]))
+            elements.append(Spacer(1, 0.2 * inch))
+
+            stats_data = [
+                ["Metric", "Value"],
+                ["Mean Score", round(mean_score, 2)],
+                ["Standard Deviation", round(std_dev, 2)],
+                ["Variance", round(variance, 2)],
+                ["Total Records", len(df)]
+            ]
+
+            table = Table(stats_data, hAlign="LEFT")
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black)
+            ]))
+
+            elements.append(table)
+            elements.append(Spacer(1, 0.4 * inch))
+
+            # Benchmark Table
+            elements.append(Paragraph("Course Benchmarking", styles["Heading2"]))
+            elements.append(Spacer(1, 0.2 * inch))
+
+            course_avg = (
+                df.groupby("course_name")["score"]
+                .mean()
+                .reset_index()
+                .sort_values("score", ascending=False)
+            )
+
+            benchmark_data = [["Course", "Average Score"]]
+
+            for _, row in course_avg.iterrows():
+                benchmark_data.append([
+                    row["course_name"],
+                    round(row["score"], 2)
+                ])
+
+            table2 = Table(benchmark_data, hAlign="LEFT")
+            table2.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black)
+            ]))
+
+            elements.append(table2)
+
+            doc.build(elements)
+
+            with open(pdf_path, "rb") as f:
+                st.download_button(
+                    "Download PDF Report",
+                    f,
+                    file_name="canvas_rubric_report.pdf",
+                    mime="application/pdf"
+                )
+
+            os.remove(pdf_path)
