@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
