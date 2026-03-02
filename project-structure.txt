@@ -1,0 +1,19 @@
+canvas-admin-rubric/
+│
+├── app.py
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
+│
+├── services/
+│   ├── canvas_client.py
+│   ├── course_service.py
+│   ├── rubric_service.py
+│
+├── processors/
+│   └── rubric_processor.py
+│
+└── utils/
+    ├── rate_limiter.py
+    ├── retry.py
+    ├── streaming_export.py
