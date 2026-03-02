@@ -73,20 +73,41 @@ if page == "Extraction":
 
         selected_account_id = account_dict[selected_account_label]
 
-        if pull_type == "Term":
-
-            terms = course_service.get_terms(selected_account_id)
-
-            term_dict = {
-                f"{t.name} (ID: {t.id})": t.id for t in terms
-            }
-
+    # ---------------------------------------------------
+    # Load Terms
+    # ---------------------------------------------------
+    
+    if pull_type == "Term" and selected_account_id:
+    
+        try:
+            canvas_client = CanvasClient(base_url, api_key)
+            course_service = CourseService(canvas_client)
+    
+            with st.spinner("Loading enrollment terms..."):
+                terms = course_service.get_terms(selected_account_id)
+    
+            if not terms:
+                st.error("No enrollment terms found for this account.")
+                st.stop()
+    
+            # Build dropdown label including SIS ID
+            term_dict = {}
+    
+            for t in terms:
+                sis_id = getattr(t, "sis_term_id", None)
+                label = f"{t.name} (SIS ID: {sis_id})"
+                term_dict[label] = t.id
+    
             selected_term_label = st.selectbox(
                 "Select Enrollment Term",
-                list(term_dict.keys())
+                sorted(term_dict.keys())
             )
-
+    
             selected_term_id = term_dict[selected_term_label]
+    
+        except Exception as e:
+            st.error(f"Failed to load terms: {str(e)}")
+            st.stop()
 
     if st.button("Run Extraction"):
 
