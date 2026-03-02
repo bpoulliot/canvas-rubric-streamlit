@@ -52,7 +52,7 @@ if page == "Extraction":
         course_service = CourseService(canvas_client)
 
         # ---------------------------------------------------
-        # Load Accounts (Filtered + Ordered)
+        # Load Accounts
         # ---------------------------------------------------
 
         accounts = course_service.get_all_accounts()
@@ -69,18 +69,12 @@ if page == "Extraction":
         selected_account_id = account_dict[selected_account_label]
 
         # ---------------------------------------------------
-        # Load Terms FROM ROOT ACCOUNT ONLY
-        # Filter specific term names
-        # Order by SIS ID descending (numeric)
+        # TERM MODE
         # ---------------------------------------------------
 
         if pull_type == "Term":
 
             terms = course_service.get_root_terms()
-
-            if not terms:
-                st.error("No enrollment terms found in root account.")
-                st.stop()
 
             EXCLUDED_TERM_NAMES = [
                 "permanent term",
@@ -90,7 +84,6 @@ if page == "Extraction":
                 "qm reviews"
             ]
 
-            # Filter excluded terms (case-insensitive)
             filtered_terms = [
                 t for t in terms
                 if t.name.lower() not in EXCLUDED_TERM_NAMES
@@ -98,11 +91,10 @@ if page == "Extraction":
 
             def sis_sort_key(term):
                 sis_id = getattr(term, "sis_term_id", None)
-
                 if sis_id and str(sis_id).isdigit():
-                    return (0, -int(sis_id))  # numeric descending
+                    return (0, -int(sis_id))
                 else:
-                    return (1, str(sis_id))   # non-numeric sorted after
+                    return (1, str(sis_id))
 
             terms_sorted = sorted(filtered_terms, key=sis_sort_key)
 
@@ -120,11 +112,52 @@ if page == "Extraction":
 
             selected_term_id = term_dict[selected_term_label]
 
+            # ---------------------------------------------------
+            # NEW: Estimated Courses Checkbox (Term Only)
+            # ---------------------------------------------------
+
+            estimate_courses = st.checkbox(
+                "Estimate Eligible Courses",
+                value=False
+            )
+
+            if estimate_courses and selected_term_id:
+
+                try:
+                    courses_preview = course_service.get_courses(
+                        account_id=selected_account_id,
+                        pull_type="Term",
+                        term_id=selected_term_id
+                    )
+
+                    courses_preview = course_service.filter_courses(courses_preview)
+
+                    course_count = len(courses_preview)
+
+                    estimated_seconds = int(course_count * 2.5)
+                    estimated_time = str(timedelta(seconds=estimated_seconds))
+
+                    st.info(
+                        f"{course_count} courses selected which is estimated to take "
+                        f"{estimated_time} to complete."
+                    )
+
+                except Exception as e:
+                    st.error(str(e))
+
     # ---------------------------------------------------
     # Run Extraction
     # ---------------------------------------------------
 
     if st.button("Run Extraction"):
+
+        if not selected_account_id:
+            st.error("Please select an Account.")
+            st.stop()
+
+        if pull_type == "Term" and not selected_term_id:
+            st.error("Please select an Enrollment Term.")
+            st.stop()
 
         rubric_service = RubricService()
 
@@ -160,7 +193,6 @@ if page == "Extraction":
 
         df = pd.DataFrame(records)
 
-        # Ensure no sensitive identifiers
         for col in ["student_id", "student_name", "criterion_id"]:
             if col in df.columns:
                 df.drop(columns=[col], inplace=True)
@@ -175,44 +207,3 @@ if page == "Extraction":
             file_name="canvas_admin_rubrics.csv",
             mime="text/csv"
         )
-
-# ===================================================
-# VISUALIZATIONS PAGE
-# ===================================================
-
-if page == "Visualizations":
-
-    st.title("Rubric Visualizations")
-
-    if "rubric_df" not in st.session_state:
-        st.warning("No rubric data available. Run Extraction first.")
-        st.stop()
-
-    df = st.session_state["rubric_df"]
-
-    tab1, tab2 = st.tabs(["Heatmap", "Raw Data"])
-
-    with tab1:
-        heatmap_data = (
-            df.groupby(["course_name", "criterion_name"])["score"]
-            .mean()
-            .reset_index()
-        )
-
-        pivot = heatmap_data.pivot(
-            index="course_name",
-            columns="criterion_name",
-            values="score"
-        )
-
-        fig = px.imshow(
-            pivot,
-            text_auto=True,
-            aspect="auto",
-            title="Average Score Heatmap"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with tab2:
-        st.dataframe(df, use_container_width=True)
