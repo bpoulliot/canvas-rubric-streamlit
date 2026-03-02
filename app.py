@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import timedelta
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from services.canvas_client import CanvasClient
 from services.course_service import CourseService
 from services.rubric_service import RubricService
@@ -43,52 +44,33 @@ if page == "Extraction":
     # ---------------------------------------------------
 
     if not st.session_state.connected:
-    
+
         if st.button("Connect to Canvas"):
-    
+
             if not base_url or not api_key:
                 st.error("Base URL and API Token required.")
                 st.stop()
-    
+
             try:
                 with st.spinner("Validating connection..."):
-    
                     canvas_client = CanvasClient(base_url, api_key)
                     canvas_client.get_account(1)
-    
-                st.success("Connection validated.")
-    
+
                 course_service = CourseService(canvas_client)
-    
-                accounts = []
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-    
-                with st.spinner("Loading accounts and subaccounts..."):
-    
-                    streamed_accounts = list(course_service.stream_all_accounts())
-    
-                    total = len(streamed_accounts)
-    
-                    for i, acct in enumerate(streamed_accounts):
-                        accounts.append(acct)
-                        progress_bar.progress((i + 1) / total)
-                        status_text.text(
-                            f"Loading accounts... {i+1}/{total}"
-                        )
-    
-                final_accounts = course_service.finalize_accounts(accounts)
-    
+
+                with st.spinner("Loading accounts..."):
+                    accounts = course_service.get_all_accounts()
+
                 st.session_state.canvas_client = canvas_client
-                st.session_state.accounts = final_accounts
+                st.session_state.accounts = accounts
                 st.session_state.connected = True
-    
-                st.success("Accounts loaded successfully.")
-    
+
+                st.success("Connected successfully.")
+
             except Exception as e:
                 st.error(f"Connection failed: {str(e)}")
                 st.stop()
-    
+
         st.stop()
 
     # ---------------------------------------------------
@@ -116,10 +98,11 @@ if page == "Extraction":
         index=0
     )
 
-    include_comments = st.toggle("Pull Rubric Comments", value=False)
-    max_workers = st.slider("Parallel Workers", 2, 20, 10)
-
     selected_term_id = None
+
+    # ---------------------------------------------------
+    # TERM MODE
+    # ---------------------------------------------------
 
     if pull_type == "Term":
 
@@ -159,30 +142,41 @@ if page == "Extraction":
 
         selected_term_id = term_dict[selected_term_label]
 
-        # Estimated courses checkbox (TERM ONLY)
-        estimate_courses = st.checkbox("Estimate Eligible Courses")
+        # -----------------------------------------------
+        # Estimate Checkbox (ONLY when Term selected)
+        # -----------------------------------------------
 
-        if estimate_courses:
+        if selected_term_id:
 
-            with st.spinner("Estimating eligible courses..."):
+            estimate_courses = st.checkbox("Estimate Eligible Courses")
 
-                preview_courses = course_service.get_courses(
-                    account_id=selected_account_id,
-                    pull_type="Term",
-                    term_id=selected_term_id
+            if estimate_courses:
+
+                with st.spinner("Estimating eligible courses..."):
+
+                    preview_courses = course_service.get_courses(
+                        account_id=selected_account_id,
+                        pull_type="Term",
+                        term_id=selected_term_id
+                    )
+
+                    preview_courses = course_service.filter_courses(preview_courses)
+
+                    course_count = len(preview_courses)
+                    estimated_seconds = int(course_count * 2.5)
+                    estimated_time = str(timedelta(seconds=estimated_seconds))
+
+                st.info(
+                    f"{course_count} courses selected which is estimated to take "
+                    f"{estimated_time} to complete."
                 )
 
-                preview_courses = course_service.filter_courses(preview_courses)
+    # ---------------------------------------------------
+    # RUBRIC COMMENT TOGGLE + WORKERS
+    # ---------------------------------------------------
 
-                course_count = len(preview_courses)
-
-                estimated_seconds = int(course_count * 2.5)
-                estimated_time = str(timedelta(seconds=estimated_seconds))
-
-            st.info(
-                f"{course_count} courses selected which is estimated to take "
-                f"{estimated_time} to complete."
-            )
+    include_comments = st.toggle("Pull Rubric Comments", value=False)
+    max_workers = st.slider("Parallel Workers", 2, 20, 10)
 
     # ---------------------------------------------------
     # RUN EXTRACTION
@@ -221,7 +215,7 @@ if page == "Extraction":
                     ): c for c in courses
                 }
 
-                for future in futures:
+                for future in as_completed(futures):
                     result = future.result()
                     if result:
                         records.extend(result)
