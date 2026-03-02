@@ -15,7 +15,7 @@ st.set_page_config(page_title="Canvas Admin Rubric Extractor", layout="wide")
 page = st.sidebar.radio("Navigation", ["Extraction", "Visualizations"])
 
 # ---------------------------------------------------
-# Session State Initialization
+# Session State
 # ---------------------------------------------------
 
 if "connected" not in st.session_state:
@@ -43,7 +43,7 @@ if page == "Extraction":
     api_key = st.text_input("Paste Admin API Token", type="password")
 
     # ---------------------------------------------------
-    # CONNECTION SECTION
+    # CONNECTION
     # ---------------------------------------------------
 
     if not st.session_state.connected:
@@ -51,7 +51,6 @@ if page == "Extraction":
         if st.button("Connect to Canvas"):
 
             if base_url and api_key:
-
                 try:
                     with st.spinner("Validating connection..."):
                         canvas_client = CanvasClient(base_url, api_key)
@@ -69,17 +68,15 @@ if page == "Extraction":
 
                 except Exception as e:
                     st.error(f"Connection failed: {str(e)}")
-
             else:
                 st.error("Base URL and API Token required.")
 
     # ---------------------------------------------------
-    # POST CONNECTION RENDER
+    # POST CONNECTION UI
     # ---------------------------------------------------
 
     if st.session_state.connected:
 
-        # Timed success message
         if st.session_state.connection_timestamp:
             if time.time() - st.session_state.connection_timestamp < 3:
                 st.success("Connected successfully.")
@@ -89,18 +86,10 @@ if page == "Extraction":
         canvas_client = st.session_state.canvas_client
         course_service = CourseService(canvas_client)
 
-        # ---------------------------------------------------
-        # Pull Mode
-        # ---------------------------------------------------
-
         pull_type = st.selectbox(
             "Pull Courses By",
             ["Term", "Entire Account"]
         )
-
-        # ---------------------------------------------------
-        # Account Dropdown
-        # ---------------------------------------------------
 
         account_dict = {
             f"{a.name} (ID: {a.id})": a.id
@@ -115,7 +104,7 @@ if page == "Extraction":
         selected_account_id = account_dict[selected_account_label]
 
         # ---------------------------------------------------
-        # Enrollment Term Dropdown (Always Required)
+        # TERMS
         # ---------------------------------------------------
 
         with st.spinner("Loading root enrollment terms..."):
@@ -155,22 +144,34 @@ if page == "Extraction":
         selected_term_id = term_dict[selected_term_label]
 
         # ---------------------------------------------------
-        # Validation Rules
+        # VALIDATION + WARNINGS
         # ---------------------------------------------------
 
         valid_configuration = False
 
         if pull_type == "Term":
-            if selected_account_id != 1:
+
+            if selected_account_id == 1:
+                st.warning(
+                    "Pull by Term requires selecting an account other than the root account (ID = 1)."
+                )
+            else:
                 valid_configuration = True
+
             include_comments = st.toggle("Pull Rubric Comments", value=False)
+
         else:
             include_comments = False
-            if selected_term_id:
+
+            if not selected_term_id:
+                st.warning(
+                    "Pull by Entire Account requires selecting an Enrollment Term."
+                )
+            else:
                 valid_configuration = True
 
         # ---------------------------------------------------
-        # Estimate Courses (Only When Valid)
+        # ESTIMATE COURSES (WITH PROGRESS)
         # ---------------------------------------------------
 
         if valid_configuration:
@@ -187,9 +188,19 @@ if page == "Extraction":
                         term_id=selected_term_id
                     )
 
-                    preview_courses = course_service.filter_courses(preview_courses)
+                    progress_bar = st.progress(0)
 
-                    course_count = len(preview_courses)
+                    filtered_preview = []
+                    total_preview = len(preview_courses)
+
+                    for i, course in enumerate(preview_courses):
+                        filtered_preview.extend(
+                            course_service.filter_courses([course])
+                        )
+                        progress_bar.progress((i + 1) / total_preview)
+
+                    course_count = len(filtered_preview)
+
                     estimated_seconds = int(course_count * 2.5)
                     estimated_time = str(timedelta(seconds=estimated_seconds))
 
@@ -199,7 +210,7 @@ if page == "Extraction":
                 )
 
         # ---------------------------------------------------
-        # Extraction Controls
+        # RUN EXTRACTION
         # ---------------------------------------------------
 
         max_workers = st.slider("Parallel Workers", 2, 20, 10)
@@ -209,6 +220,9 @@ if page == "Extraction":
             and api_key
             and valid_configuration
         )
+
+        if not extraction_ready:
+            st.warning("Please complete required selections before running extraction.")
 
         if st.button("Run Extraction", disabled=not extraction_ready):
 
