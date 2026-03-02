@@ -43,44 +43,52 @@ if page == "Extraction":
     # ---------------------------------------------------
 
     if not st.session_state.connected:
-
+    
         if st.button("Connect to Canvas"):
-
+    
             if not base_url or not api_key:
                 st.error("Base URL and API Token required.")
                 st.stop()
-
+    
             try:
                 with st.spinner("Validating connection..."):
-
+    
                     canvas_client = CanvasClient(base_url, api_key)
-
-                    # Validate root account access
-                    root_account = canvas_client.get_account(1)
-
+                    canvas_client.get_account(1)
+    
                 st.success("Connection validated.")
-
-                # Async load accounts
-                with st.spinner("Loading accounts..."):
-
-                    course_service = CourseService(canvas_client)
-
-                    with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(
-                            course_service.get_all_accounts
+    
+                course_service = CourseService(canvas_client)
+    
+                accounts = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+    
+                with st.spinner("Loading accounts and subaccounts..."):
+    
+                    streamed_accounts = list(course_service.stream_all_accounts())
+    
+                    total = len(streamed_accounts)
+    
+                    for i, acct in enumerate(streamed_accounts):
+                        accounts.append(acct)
+                        progress_bar.progress((i + 1) / total)
+                        status_text.text(
+                            f"Loading accounts... {i+1}/{total}"
                         )
-                        accounts = future.result()
-
+    
+                final_accounts = course_service.finalize_accounts(accounts)
+    
                 st.session_state.canvas_client = canvas_client
-                st.session_state.accounts = accounts
+                st.session_state.accounts = final_accounts
                 st.session_state.connected = True
-
+    
                 st.success("Accounts loaded successfully.")
-
+    
             except Exception as e:
                 st.error(f"Connection failed: {str(e)}")
                 st.stop()
-
+    
         st.stop()
 
     # ---------------------------------------------------
