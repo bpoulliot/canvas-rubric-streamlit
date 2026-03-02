@@ -1,3 +1,4 @@
+from canvasapi.exceptions import ResourceDoesNotExist
 from utils.retry import retry
 from utils.rate_limiter import global_rate_limiter
 
@@ -8,43 +9,59 @@ class CourseService:
         self.client = canvas_client
 
     @retry()
-    def get_courses(self, account_id, pull_type, term_id=None):
-        """
-        Pull courses strictly by:
-        - Entire Account (account_id only)
-        - Account ID AND Term ID (if Term selected)
-        """
+    def get_all_accounts(self):
+        global_rate_limiter.wait()
+        accounts = list(self.client.canvas.get_accounts())
 
+        all_accounts = []
+
+        for account in accounts:
+            all_accounts.append(account)
+            try:
+                subaccounts = list(account.get_subaccounts(recursive=True))
+                all_accounts.extend(subaccounts)
+            except Exception:
+                pass
+
+        return all_accounts
+
+    @retry()
+    def get_terms(self, account_id):
         global_rate_limiter.wait()
         account = self.client.get_account(account_id)
+        return list(account.get_enrollment_terms())
 
-        if pull_type == "Term":
-            if not term_id:
-                raise ValueError("Term ID must be provided when pull_type='Term'")
+    @retry()
+    def get_courses(self, account_id, pull_type, term_id=None):
 
-            # Explicit: account scoped + term scoped
-            courses = account.get_courses(
-                enrollment_term_id=term_id,
-                state=["available"]
+        try:
+            global_rate_limiter.wait()
+            account = self.client.get_account(account_id)
+
+            if pull_type == "Term":
+                if not term_id:
+                    raise ValueError("Term must be selected.")
+                courses = account.get_courses(
+                    enrollment_term_id=term_id,
+                    state=["available"]
+                )
+
+            elif pull_type == "Entire Account":
+                courses = account.get_courses(
+                    state=["available"]
+                )
+
+            else:
+                raise ValueError("Invalid pull_type")
+
+            return list(courses)
+
+        except ResourceDoesNotExist:
+            raise ValueError(
+                "Canvas returned 'Not Found'. Verify account access and token permissions."
             )
-
-        elif pull_type == "Entire Account":
-            courses = account.get_courses(
-                state=["available"]
-            )
-
-        else:
-            raise ValueError("Invalid pull_type")
-
-        return list(courses)
 
     def filter_courses(self, courses):
-        """
-        Skip:
-        - Unpublished courses
-        - Courses with no assignments
-        """
-
         filtered = []
 
         for course in courses:
