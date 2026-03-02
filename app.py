@@ -118,10 +118,16 @@ if page == "Extraction":
                     records.extend(result)
 
         df = pd.DataFrame(records)
+        
+        # Ensure no student identifiers are ever present
+        for col in ["student_id", "user_id", "student_name", "criterion_id"]:
+            if col in df.columns:
+                df.drop(columns=[col], inplace=True)
+        
         st.session_state["rubric_df"] = df
-
+        
         st.success("Extraction complete")
-
+        
         st.download_button(
             "Download CSV",
             df.to_csv(index=False).encode("utf-8"),
