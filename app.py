@@ -119,6 +119,7 @@ if st.button("Run Extraction"):
             pull_type=pull_type,
             term_id=term_id
         )
+    
         courses = course_service.filter_courses(courses)
 
     if not courses:
