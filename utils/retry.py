@@ -11,6 +11,9 @@ def retry(max_attempts=5, base_delay=1):
             while attempt < max_attempts:
                 try:
                     return func(*args, **kwargs)
+                except ValueError:
+                    # Do NOT retry validation or 404 errors
+                    raise
                 except Exception:
                     attempt += 1
                     if attempt >= max_attempts:
