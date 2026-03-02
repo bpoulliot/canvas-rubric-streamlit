@@ -25,48 +25,49 @@ class CourseService:
         self.client = canvas_client
 
     # ---------------------------------------------------
-    # Account Retrieval + Filtering + Ordering
+    # STREAMING Account Loader (Progress Friendly)
     # ---------------------------------------------------
 
     @retry()
-    def get_all_accounts(self):
+    def stream_all_accounts(self):
+        """
+        Generator that yields accounts progressively.
+        Allows UI progress updates.
+        """
+
         global_rate_limiter.wait()
+        root_accounts = list(self.client.canvas.get_accounts())
 
-        accounts = list(self.client.canvas.get_accounts())
-        all_accounts = []
+        for root in root_accounts:
 
-        for account in accounts:
-            all_accounts.append(account)
+            yield root
 
             try:
-                subaccounts = list(account.get_subaccounts(recursive=True))
-                all_accounts.extend(subaccounts)
+                global_rate_limiter.wait()
+                subaccounts = list(root.get_subaccounts(recursive=True))
+                for sub in subaccounts:
+                    yield sub
             except Exception:
-                pass
+                continue
+
+    # ---------------------------------------------------
+    # Account Post-Processing
+    # ---------------------------------------------------
+
+    def finalize_accounts(self, accounts):
+        """
+        Applies filtering and grouping logic after streaming load.
+        """
 
         filtered_accounts = []
 
-        for account in all_accounts:
+        for account in accounts:
             name_lower = account.name.lower()
 
-            # Filter by excluded terms
             if any(term in name_lower for term in EXCLUDED_ACCOUNT_TERMS):
                 continue
 
-            # Filter accounts with zero available courses
-            try:
-                global_rate_limiter.wait()
-                courses = list(account.get_courses(state=["available"]))
-                if len(courses) == 0:
-                    continue
-            except Exception:
-                continue
-
             filtered_accounts.append(account)
-
-        # ---------------------------------------------------
-        # Custom Grouped Ordering Logic
-        # ---------------------------------------------------
 
         def account_sort_key(account):
             name = account.name.lower()
@@ -128,19 +129,14 @@ class CourseService:
 
         except ResourceDoesNotExist:
             raise ValueError(
-                "Canvas returned 'Not Found'. Verify account access and token permissions."
+                "Canvas returned 'Not Found'. Verify account access."
             )
-
-    # ---------------------------------------------------
-    # Filter Courses
-    # ---------------------------------------------------
 
     def filter_courses(self, courses):
 
         filtered = []
 
         for course in courses:
-
             if course.workflow_state != "available":
                 continue
 
