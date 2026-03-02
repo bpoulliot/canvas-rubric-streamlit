@@ -70,22 +70,52 @@ if page == "Extraction":
 
         # ---------------------------------------------------
         # Load Terms FROM ROOT ACCOUNT ONLY
+        # Filter specific term names
+        # Order by SIS ID descending (numeric)
         # ---------------------------------------------------
 
         if pull_type == "Term":
 
             terms = course_service.get_root_terms()
 
+            if not terms:
+                st.error("No enrollment terms found in root account.")
+                st.stop()
+
+            EXCLUDED_TERM_NAMES = [
+                "permanent term",
+                "default term",
+                "sandboxes for faculty",
+                "summer 2017 pilot courses",
+                "qm reviews"
+            ]
+
+            # Filter excluded terms (case-insensitive)
+            filtered_terms = [
+                t for t in terms
+                if t.name.lower() not in EXCLUDED_TERM_NAMES
+            ]
+
+            def sis_sort_key(term):
+                sis_id = getattr(term, "sis_term_id", None)
+
+                if sis_id and str(sis_id).isdigit():
+                    return (0, -int(sis_id))  # numeric descending
+                else:
+                    return (1, str(sis_id))   # non-numeric sorted after
+
+            terms_sorted = sorted(filtered_terms, key=sis_sort_key)
+
             term_dict = {}
 
-            for t in terms:
+            for t in terms_sorted:
                 sis_id = getattr(t, "sis_term_id", None)
                 label = f"{t.name} (SIS ID: {sis_id})"
                 term_dict[label] = t.id
 
             selected_term_label = st.selectbox(
                 "Select Enrollment Term",
-                sorted(term_dict.keys())
+                list(term_dict.keys())
             )
 
             selected_term_id = term_dict[selected_term_label]
@@ -130,6 +160,7 @@ if page == "Extraction":
 
         df = pd.DataFrame(records)
 
+        # Ensure no sensitive identifiers
         for col in ["student_id", "student_name", "criterion_id"]:
             if col in df.columns:
                 df.drop(columns=[col], inplace=True)
@@ -144,3 +175,44 @@ if page == "Extraction":
             file_name="canvas_admin_rubrics.csv",
             mime="text/csv"
         )
+
+# ===================================================
+# VISUALIZATIONS PAGE
+# ===================================================
+
+if page == "Visualizations":
+
+    st.title("Rubric Visualizations")
+
+    if "rubric_df" not in st.session_state:
+        st.warning("No rubric data available. Run Extraction first.")
+        st.stop()
+
+    df = st.session_state["rubric_df"]
+
+    tab1, tab2 = st.tabs(["Heatmap", "Raw Data"])
+
+    with tab1:
+        heatmap_data = (
+            df.groupby(["course_name", "criterion_name"])["score"]
+            .mean()
+            .reset_index()
+        )
+
+        pivot = heatmap_data.pivot(
+            index="course_name",
+            columns="criterion_name",
+            values="score"
+        )
+
+        fig = px.imshow(
+            pivot,
+            text_auto=True,
+            aspect="auto",
+            title="Average Score Heatmap"
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab2:
+        st.dataframe(df, use_container_width=True)
