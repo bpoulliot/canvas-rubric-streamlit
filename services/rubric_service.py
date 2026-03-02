@@ -7,17 +7,38 @@ class RubricService:
     @retry()
     def get_assignments_with_rubrics(self, course):
         global_rate_limiter.wait()
+
         assignments = list(course.get_assignments())
-        return [a for a in assignments if getattr(a, "rubric", None)]
+
+        return [
+            a for a in assignments
+            if getattr(a, "rubric", None)
+        ]
 
     @retry()
     def get_active_submissions(self, assignment):
+        """
+        Safely retrieves submissions that include rubric assessments.
+        Prevents AttributeError if rubric_assessment not present.
+        """
+
         global_rate_limiter.wait()
+
         submissions = assignment.get_submissions(
             include=["rubric_assessment"]
         )
 
-        return [
-            s for s in submissions
-            if s.workflow_state == "graded" and s.rubric_assessment
-        ]
+        valid_submissions = []
+
+        for s in submissions:
+
+            # Safely check workflow_state
+            workflow_state = getattr(s, "workflow_state", None)
+
+            # Safely check rubric_assessment
+            rubric_assessment = getattr(s, "rubric_assessment", None)
+
+            if workflow_state == "graded" and rubric_assessment:
+                valid_submissions.append(s)
+
+        return valid_submissions
