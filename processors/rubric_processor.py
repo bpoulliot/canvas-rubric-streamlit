@@ -5,9 +5,6 @@ class RubricProcessor:
 
     @staticmethod
     def scrub_names(comment, student_names):
-        """
-        Replace any first or last name occurrences in comment
-        """
         if not comment:
             return comment
 
@@ -30,11 +27,22 @@ class RubricProcessor:
         if include_comments:
             enrollments = course.get_enrollments(type=["StudentEnrollment"])
             for e in enrollments:
-                if hasattr(e, "user"):
+                if hasattr(e, "user") and e.user:
                     name_parts = e.user["name"].split()
                     student_names.extend(name_parts)
 
         for assignment in assignments:
+
+            rubric_name = assignment.name  # Canvas does not always expose rubric title directly
+
+            # Build rubric criterion lookup from assignment.rubric
+            rubric_criteria_lookup = {}
+            if hasattr(assignment, "rubric") and assignment.rubric:
+                for criterion in assignment.rubric:
+                    rubric_criteria_lookup[criterion["id"]] = {
+                        "criterion_name": criterion.get("description"),
+                        "criterion_description": criterion.get("long_description")
+                    }
 
             submissions = rubric_service.get_active_submissions(assignment)
 
@@ -47,6 +55,8 @@ class RubricProcessor:
 
                 for cid, cdata in rubric_data.items():
 
+                    criterion_meta = rubric_criteria_lookup.get(cid, {})
+
                     comment = None
                     if include_comments:
                         comment = cdata.get("comments")
@@ -58,7 +68,9 @@ class RubricProcessor:
                     yield {
                         "course_name": course.name,
                         "assignment_name": assignment.name,
-                        "criterion_id": cid,
+                        "rubric_name": rubric_name,
+                        "criterion_name": criterion_meta.get("criterion_name"),
+                        "criterion_description": criterion_meta.get("criterion_description"),
                         "score": cdata.get("points"),
                         "rubric_comment": comment if include_comments else None
                     }
