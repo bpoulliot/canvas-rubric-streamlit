@@ -10,6 +10,7 @@ EXCLUDED_ACCOUNT_TERMS = [
     "self-enroll",
     "committees",
     "templates",
+    "template",
     "zoom testing",
     "manually",
     "permanent",
@@ -43,27 +44,41 @@ class CourseService:
             except Exception:
                 pass
 
-        # Filter excluded terms
         filtered_accounts = []
 
         for account in all_accounts:
             name_lower = account.name.lower()
 
+            # Filter by excluded terms
             if any(term in name_lower for term in EXCLUDED_ACCOUNT_TERMS):
+                continue
+
+            # Filter accounts with zero available courses
+            try:
+                global_rate_limiter.wait()
+                courses = list(account.get_courses(state=["available"]))
+                if len(courses) == 0:
+                    continue
+            except Exception:
                 continue
 
             filtered_accounts.append(account)
 
-        # Custom ordering
+        # ---------------------------------------------------
+        # Custom Grouped Ordering Logic
+        # ---------------------------------------------------
+
         def account_sort_key(account):
             name = account.name.lower()
 
             if "_college" in name:
                 group = 0
-            elif "archive" in name:
-                group = 2
-            else:
+            elif ": college" in name or ": school" in name or ": cross" in name:
                 group = 1
+            elif "archive" in name:
+                group = 3
+            else:
+                group = 2
 
             return (group, name)
 
@@ -72,16 +87,13 @@ class CourseService:
         return filtered_accounts
 
     # ---------------------------------------------------
-    # Term Retrieval (ROOT ACCOUNT ONLY)
+    # Root Term Retrieval
     # ---------------------------------------------------
 
     @retry()
     def get_root_terms(self):
         global_rate_limiter.wait()
-
-        # Root account is ID 1
         root_account = self.client.get_account(1)
-
         return list(root_account.get_enrollment_terms())
 
     # ---------------------------------------------------
