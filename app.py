@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.canvas_client import CanvasClient
@@ -13,27 +14,105 @@ st.set_page_config(page_title="Canvas Admin Rubric Extractor", layout="wide")
 
 page = st.sidebar.radio("Navigation", ["Extraction", "Visualizations"])
 
-# ---------------------------------------------------
+# ============================================================
 # Session State Initialization
-# ---------------------------------------------------
+# ============================================================
 
-if "connected" not in st.session_state:
-    st.session_state.connected = False
+DEFAULT_STATE = {
+    "connected": False,
+    "canvas_client": None,
+    "accounts": []
+}
 
-if "canvas_client" not in st.session_state:
-    st.session_state.canvas_client = None
-
-if "accounts" not in st.session_state:
-    st.session_state.accounts = []
+for key, value in DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
-# ===================================================
+# ============================================================
+# Utility: Validate Extraction Configuration
+# ============================================================
+
+def validate_configuration(pull_type, account_id, term_id):
+    """
+    Centralized validation guardrail.
+    Prevents future ordering regressions.
+    """
+
+    if pull_type == "Term":
+        return account_id is not None and account_id != 1
+    else:
+        return term_id is not None
+
+
+# ============================================================
+# Extraction Logic
+# ============================================================
+
+def run_extraction(course_service, rubric_service,
+                   account_id, pull_type, term_id,
+                   include_comments, max_workers):
+
+    with st.spinner("Retrieving courses..."):
+        courses = course_service.get_courses(
+            account_id=account_id,
+            pull_type=pull_type,
+            term_id=term_id
+        )
+        courses = course_service.filter_courses(courses)
+
+    total_courses = len(courses)
+
+    if total_courses == 0:
+        st.warning("No eligible courses found.")
+        return None
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    records = []
+    completed = 0
+
+    with st.spinner("Pulling rubrics and submissions..."):
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    lambda c=c: list(
+                        RubricProcessor.generate_records(
+                            c,
+                            rubric_service,
+                            include_comments=include_comments
+                        )
+                    )
+                ): c for c in courses
+            }
+
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    records.extend(result)
+
+                completed += 1
+                progress_bar.progress(completed / total_courses)
+                status_text.text(
+                    f"Processed {completed} of {total_courses} courses"
+                )
+
+    return pd.DataFrame(records)
+
+
+# ============================================================
 # EXTRACTION PAGE
-# ===================================================
+# ============================================================
 
 if page == "Extraction":
 
     st.title("Canvas Admin Rubric Extractor")
+
+    # ========================================================
+    # CONNECTION VIEW
+    # ========================================================
 
     if not st.session_state.connected:
 
@@ -61,20 +140,31 @@ if page == "Extraction":
                 except Exception as e:
                     st.error(f"Connection failed: {str(e)}")
 
+    # ========================================================
+    # EXTRACTION VIEW
+    # ========================================================
+
     else:
 
         canvas_client = st.session_state.canvas_client
         course_service = CourseService(canvas_client)
 
+        # Disconnect guardrail
         col1, col2 = st.columns([8, 2])
         with col2:
             if st.button("Disconnect"):
-                st.session_state.connected = False
-                st.session_state.canvas_client = None
-                st.session_state.accounts = []
+                for key in DEFAULT_STATE:
+                    st.session_state[key] = DEFAULT_STATE[key]
                 st.rerun()
 
-        pull_type = st.selectbox("Pull Courses By", ["Term", "Entire Account"])
+        # ----------------------------------------------------
+        # Input Controls (Defined FIRST)
+        # ----------------------------------------------------
+
+        pull_type = st.selectbox(
+            "Pull Courses By",
+            ["Term", "Entire Account"]
+        )
 
         account_dict = {
             f"{a.name} (ID: {a.id})": a.id
@@ -103,6 +193,14 @@ if page == "Extraction":
             if t.name.lower() not in EXCLUDED_TERM_NAMES
         ]
 
+        def sis_sort_key(term):
+            sis_id = getattr(term, "sis_term_id", None)
+            if sis_id and str(sis_id).isdigit():
+                return (0, -int(sis_id))
+            return (1, str(sis_id))
+
+        filtered_terms.sort(key=sis_sort_key)
+
         term_dict = {
             f"{t.name} (SIS ID: {getattr(t,'sis_term_id',None)})": t.id
             for t in filtered_terms
@@ -115,107 +213,76 @@ if page == "Extraction":
 
         selected_term_id = term_dict[selected_term_label]
 
+        # ----------------------------------------------------
+        # Validation (AFTER inputs defined)
+        # ----------------------------------------------------
+
+        valid_configuration = validate_configuration(
+            pull_type,
+            selected_account_id,
+            selected_term_id
+        )
+
+        if pull_type == "Term" and selected_account_id == 1:
+            st.warning(
+                "Pull by Term requires selecting an account other than root (ID = 1)."
+            )
+
+        if pull_type == "Entire Account" and not selected_term_id:
+            st.warning(
+                "Pull by Entire Account requires selecting an Enrollment Term."
+            )
+
         include_comments = False
 
         if pull_type == "Term":
-            if selected_account_id == 1:
-                st.warning("Pull by Term requires selecting an account other than root.")
-            else:
-                include_comments = st.toggle("Pull Rubric Comments", value=False)
+            include_comments = st.toggle(
+                "Pull Rubric Comments",
+                value=False
+            )
 
         max_workers = st.slider("Parallel Workers", 2, 20, 10)
 
-    # ---------------------------------------------------
-    # Determine Extraction Readiness
-    # ---------------------------------------------------
-    
-    extraction_ready = False
-    
-    if pull_type == "Term":
-        if selected_account_id != 1:
-            extraction_ready = True
-    else:
-        if selected_term_id:
-            extraction_ready = True
+        # ----------------------------------------------------
+        # Run Extraction
+        # ----------------------------------------------------
 
-    if st.button("Run Extraction", disabled=not extraction_ready):
-    
-        rubric_service = RubricService()
-    
-        with st.spinner("Retrieving courses..."):
-            courses = course_service.get_courses(
-                account_id=selected_account_id,
-                pull_type=pull_type,
-                term_id=selected_term_id
-            )
-            courses = course_service.filter_courses(courses)
-    
-        total_courses = len(courses)
-    
-        if total_courses == 0:
-            st.warning("No eligible courses found.")
-        else:
-    
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-    
-            records = []
-    
-            completed_courses = 0
-    
-            with st.spinner("Pulling rubrics and submissions..."):
-    
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    
-                    futures = {
-                        executor.submit(
-                            lambda c=c: list(
-                                RubricProcessor.generate_records(
-                                    c,
-                                    rubric_service,
-                                    include_comments=include_comments
-                                )
-                            )
-                        ): c for c in courses
-                    }
-    
-                    for future in as_completed(futures):
-    
-                        result = future.result()
-    
-                        if result:
-                            records.extend(result)
-    
-                        completed_courses += 1
-    
-                        progress = completed_courses / total_courses
-                        progress_bar.progress(progress)
-    
-                        status_text.text(
-                            f"Processed {completed_courses} of {total_courses} courses"
-                        )
-    
-            df = pd.DataFrame(records)
-    
-            for col in ["student_id", "student_name", "criterion_id"]:
-                if col in df.columns:
-                    df.drop(columns=[col], inplace=True)
-    
-            st.session_state["rubric_df"] = df
-    
-            st.success("Extraction complete.")
-    
-            st.download_button(
-                "Download CSV",
-                df.to_csv(index=False).encode("utf-8"),
-                file_name="canvas_admin_rubrics.csv",
-                mime="text/csv"
+        if not valid_configuration:
+            st.warning("Complete required selections before running extraction.")
+
+        if st.button("Run Extraction", disabled=not valid_configuration):
+
+            rubric_service = RubricService()
+
+            df = run_extraction(
+                course_service,
+                rubric_service,
+                selected_account_id,
+                pull_type,
+                selected_term_id,
+                include_comments,
+                max_workers
             )
 
+            if df is not None and not df.empty:
 
-# ===================================================
+                st.session_state["rubric_df"] = df
+
+                st.success("Extraction complete.")
+
+                st.download_button(
+                    "Download CSV",
+                    df.to_csv(index=False).encode("utf-8"),
+                    file_name="canvas_admin_rubrics.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("Extraction completed but no rubric data was found.")
+
+
+# ============================================================
 # VISUALIZATIONS PAGE
-# ===================================================
+# ============================================================
 
 if page == "Visualizations":
 
@@ -231,15 +298,23 @@ if page == "Visualizations":
             st.warning("No rubric data available.")
         else:
 
-            fig = px.histogram(df, x="score", nbins=20)
-            st.plotly_chart(fig, use_container_width=True)
+            tab1, tab2 = st.tabs(["Heatmap", "Raw Data"])
 
-            pivot = (
-                df.groupby(["course_name", "criterion_name"])["score"]
-                .mean()
-                .reset_index()
-                .pivot(index="course_name", columns="criterion_name", values="score")
-            )
+            with tab1:
+                heatmap_data = (
+                    df.groupby(["course_name", "criterion_name"])["score"]
+                    .mean()
+                    .reset_index()
+                )
 
-            fig2 = px.imshow(pivot, text_auto=True, aspect="auto")
-            st.plotly_chart(fig2, use_container_width=True)
+                pivot = heatmap_data.pivot(
+                    index="course_name",
+                    columns="criterion_name",
+                    values="score"
+                )
+
+                fig = px.imshow(pivot, text_auto=True, aspect="auto")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with tab2:
+                st.dataframe(df)
