@@ -23,31 +23,21 @@ class CourseService:
 
     def __init__(self, canvas_client):
         self.client = canvas_client
+        self.canvas = canvas_client.canvas
 
     # ---------------------------------------------------
-    # Account Retrieval
+    # Use /api/v1/manageable_accounts
     # ---------------------------------------------------
 
     @retry()
     def get_all_accounts(self):
-
         global_rate_limiter.wait()
-        root_accounts = list(self.client.canvas.get_accounts())
 
-        all_accounts = []
-
-        for root in root_accounts:
-            all_accounts.append(root)
-            try:
-                global_rate_limiter.wait()
-                subaccounts = list(root.get_subaccounts(recursive=True))
-                all_accounts.extend(subaccounts)
-            except Exception:
-                continue
+        accounts = list(self.canvas.get_manageable_accounts())
 
         filtered_accounts = []
 
-        for account in all_accounts:
+        for account in accounts:
             name_lower = account.name.lower()
             if any(term in name_lower for term in EXCLUDED_ACCOUNT_TERMS):
                 continue
@@ -55,6 +45,7 @@ class CourseService:
 
         def account_sort_key(account):
             name = account.name.lower()
+
             if "_college" in name:
                 group = 0
             elif ": college" in name or ": school" in name or ": cross" in name:
@@ -63,51 +54,20 @@ class CourseService:
                 group = 3
             else:
                 group = 2
+
             return (group, name)
 
         filtered_accounts.sort(key=account_sort_key)
         return filtered_accounts
 
     # ---------------------------------------------------
-    # FAST COURSE COUNT (NEW)
-    # ---------------------------------------------------
-
-    @retry()
-    def count_courses(self, account_id, pull_type, term_id=None):
-        """
-        Fast course estimation.
-        Does NOT enumerate assignments.
-        Does NOT filter by rubric presence.
-        Only counts available courses.
-        """
-
-        global_rate_limiter.wait()
-        account = self.client.get_account(account_id)
-
-        if pull_type == "Term":
-            if not term_id:
-                raise ValueError("Term must be selected.")
-
-            courses = account.get_courses(
-                enrollment_term_id=term_id,
-                state=["available"]
-            )
-        else:
-            courses = account.get_courses(
-                state=["available"]
-            )
-
-        # Efficient generator count
-        return sum(1 for _ in courses)
-
-    # ---------------------------------------------------
-    # Root Terms
+    # Root Term Retrieval
     # ---------------------------------------------------
 
     @retry()
     def get_root_terms(self):
         global_rate_limiter.wait()
-        root_account = self.client.get_account(1)
+        root_account = self.canvas.get_account(1)
         return list(root_account.get_enrollment_terms())
 
     # ---------------------------------------------------
@@ -116,59 +76,24 @@ class CourseService:
 
     @retry()
     def get_courses(self, account_id, pull_type, term_id=None):
-
         try:
             global_rate_limiter.wait()
-            account = self.client.get_account(account_id)
+            account = self.canvas.get_account(account_id)
 
-            # Common filtering arguments
-            base_kwargs = {
+            kwargs = {
                 "state": ["available"],
                 "published": True,
                 "blueprint": False,
-                "with_enrollments": True,
                 "per_page": 100
             }
 
             if pull_type == "Term":
                 if not term_id:
                     raise ValueError("Term must be selected.")
+                kwargs["enrollment_term_id"] = term_id
 
-                courses = account.get_courses(
-                    enrollment_term_id=term_id,
-                    **base_kwargs
-                )
-
-            else:
-                courses = account.get_courses(
-                    **base_kwargs
-                )
-
+            courses = account.get_courses(**kwargs)
             return list(courses)
 
         except ResourceDoesNotExist:
-            raise ValueError(
-                "Canvas returned 'Not Found'. Verify account access."
-            )
-
-    # ---------------------------------------------------
-    # Course Filtering
-    # ---------------------------------------------------
-
-    def filter_courses(self, courses):
-
-        filtered = []
-
-        for course in courses:
-            if course.workflow_state != "available":
-                continue
-
-            global_rate_limiter.wait()
-            assignments = list(course.get_assignments())
-
-            if not assignments:
-                continue
-
-            filtered.append(course)
-
-        return filtered
+            raise ValueError("Canvas returned 'Not Found'. Verify account access.")
