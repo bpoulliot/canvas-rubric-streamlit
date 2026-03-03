@@ -125,6 +125,19 @@ if page == "Extraction":
 
         max_workers = st.slider("Parallel Workers", 2, 20, 10)
 
+    # ---------------------------------------------------
+    # Determine Extraction Readiness
+    # ---------------------------------------------------
+    
+    extraction_ready = False
+    
+    if pull_type == "Term":
+        if selected_account_id != 1:
+            extraction_ready = True
+    else:
+        if selected_term_id:
+            extraction_ready = True
+
     if st.button("Run Extraction", disabled=not extraction_ready):
     
         rubric_service = RubricService()
