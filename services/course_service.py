@@ -27,55 +27,64 @@ class CourseService:
         self.canvas = canvas_client.canvas
 
     # ---------------------------------------------------
-    # Use /api/v1/manageable_accounts
+    # Manageable Accounts (REST-based)
     # ---------------------------------------------------
 
     @retry()
     def get_all_accounts(self):
         """
-        Uses raw REST call to:
+        Uses:
         GET /api/v1/manageable_accounts
+
+        This avoids CanvasAPI internal attribute usage.
         """
-    
+
         global_rate_limiter.wait()
-    
-        base_url = self.client.canvas.base_url
-        api_key = self.client.canvas._Canvas__requester.access_token  # safe access
-    
+
         headers = {
-            "Authorization": f"Bearer {api_key}"
+            "Authorization": f"Bearer {self.client.api_key}"
         }
-    
+
         response = requests.get(
-            f"{base_url}/api/v1/manageable_accounts",
+            f"{self.client.base_url}/api/v1/manageable_accounts",
             headers=headers
         )
-    
+
         if response.status_code != 200:
-            raise ValueError("Failed to retrieve manageable accounts.")
-    
+            raise ValueError(
+                f"Failed to retrieve manageable accounts "
+                f"(status {response.status_code})."
+            )
+
         accounts_json = response.json()
-    
+
         accounts = []
-    
+
         for account_data in accounts_json:
             account = self.canvas.get_account(account_data["id"])
             accounts.append(account)
-    
+
+        # -----------------------------------------------
         # Apply filtering
+        # -----------------------------------------------
+
         filtered_accounts = []
-    
+
         for account in accounts:
             name_lower = account.name.lower()
-    
+
             if any(term in name_lower for term in EXCLUDED_ACCOUNT_TERMS):
                 continue
-    
+
             filtered_accounts.append(account)
-    
+
+        # -----------------------------------------------
+        # Group + Ordering Logic
+        # -----------------------------------------------
+
         def account_sort_key(account):
             name = account.name.lower()
-    
+
             if "_college" in name:
                 group = 0
             elif ": college" in name or ": school" in name or ": cross" in name:
@@ -84,11 +93,11 @@ class CourseService:
                 group = 3
             else:
                 group = 2
-    
+
             return (group, name)
-    
+
         filtered_accounts.sort(key=account_sort_key)
-    
+
         return filtered_accounts
 
     # ---------------------------------------------------
@@ -107,6 +116,7 @@ class CourseService:
 
     @retry()
     def get_courses(self, account_id, pull_type, term_id=None):
+
         try:
             global_rate_limiter.wait()
             account = self.canvas.get_account(account_id)
@@ -124,7 +134,10 @@ class CourseService:
                 kwargs["enrollment_term_id"] = term_id
 
             courses = account.get_courses(**kwargs)
+
             return list(courses)
 
         except ResourceDoesNotExist:
-            raise ValueError("Canvas returned 'Not Found'. Verify account access.")
+            raise ValueError(
+                "Canvas returned 'Not Found'. Verify account access."
+            )
