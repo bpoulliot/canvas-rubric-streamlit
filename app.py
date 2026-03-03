@@ -125,41 +125,73 @@ if page == "Extraction":
 
         max_workers = st.slider("Parallel Workers", 2, 20, 10)
 
-        if st.button("Run Extraction"):
-
-            rubric_service = RubricService()
-
+    if st.button("Run Extraction", disabled=not extraction_ready):
+    
+        rubric_service = RubricService()
+    
+        with st.spinner("Retrieving courses..."):
             courses = course_service.get_courses(
                 account_id=selected_account_id,
                 pull_type=pull_type,
                 term_id=selected_term_id
             )
-
+            courses = course_service.filter_courses(courses)
+    
+        total_courses = len(courses)
+    
+        if total_courses == 0:
+            st.warning("No eligible courses found.")
+        else:
+    
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+    
             records = []
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        lambda c=c: list(
-                            RubricProcessor.generate_records(
-                                c,
-                                rubric_service,
-                                include_comments=include_comments
+    
+            completed_courses = 0
+    
+            with st.spinner("Pulling rubrics and submissions..."):
+    
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    
+                    futures = {
+                        executor.submit(
+                            lambda c=c: list(
+                                RubricProcessor.generate_records(
+                                    c,
+                                    rubric_service,
+                                    include_comments=include_comments
+                                )
                             )
+                        ): c for c in courses
+                    }
+    
+                    for future in as_completed(futures):
+    
+                        result = future.result()
+    
+                        if result:
+                            records.extend(result)
+    
+                        completed_courses += 1
+    
+                        progress = completed_courses / total_courses
+                        progress_bar.progress(progress)
+    
+                        status_text.text(
+                            f"Processed {completed_courses} of {total_courses} courses"
                         )
-                    ): c for c in courses
-                }
-
-                for future in as_completed(futures):
-                    result = future.result()
-                    if result:
-                        records.extend(result)
-
+    
             df = pd.DataFrame(records)
+    
+            for col in ["student_id", "student_name", "criterion_id"]:
+                if col in df.columns:
+                    df.drop(columns=[col], inplace=True)
+    
             st.session_state["rubric_df"] = df
-
+    
             st.success("Extraction complete.")
-
+    
             st.download_button(
                 "Download CSV",
                 df.to_csv(index=False).encode("utf-8"),
