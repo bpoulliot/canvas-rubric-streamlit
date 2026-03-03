@@ -1,4 +1,3 @@
-import requests
 from canvasapi.exceptions import ResourceDoesNotExist
 from utils.retry import retry
 from utils.rate_limiter import global_rate_limiter
@@ -27,50 +26,36 @@ class CourseService:
         self.canvas = canvas_client.canvas
 
     # ---------------------------------------------------
-    # Manageable Accounts (REST-based)
+    # Account Retrieval via CanvasAPI (Recursive)
     # ---------------------------------------------------
 
     @retry()
     def get_all_accounts(self):
         """
-        Uses:
-        GET /api/v1/manageable_accounts
-
-        This avoids CanvasAPI internal attribute usage.
+        Retrieves full account hierarchy using CanvasAPI.
+        Root account (ID=1) + recursive subaccounts.
         """
 
         global_rate_limiter.wait()
 
-        headers = {
-            "Authorization": f"Bearer {self.client.api_key}"
-        }
+        root_account = self.canvas.get_account(1)
 
-        response = requests.get(
-            f"{self.client.base_url}/api/v1/manageable_accounts",
-            headers=headers
-        )
+        all_accounts = [root_account]
 
-        if response.status_code != 200:
-            raise ValueError(
-                f"Failed to retrieve manageable accounts "
-                f"(status {response.status_code})."
-            )
-
-        accounts_json = response.json()
-
-        accounts = []
-
-        for account_data in accounts_json:
-            account = self.canvas.get_account(account_data["id"])
-            accounts.append(account)
+        try:
+            global_rate_limiter.wait()
+            subaccounts = list(root_account.get_subaccounts(recursive=True))
+            all_accounts.extend(subaccounts)
+        except Exception:
+            pass
 
         # -----------------------------------------------
-        # Apply filtering
+        # Apply filtering rules
         # -----------------------------------------------
 
         filtered_accounts = []
 
-        for account in accounts:
+        for account in all_accounts:
             name_lower = account.name.lower()
 
             if any(term in name_lower for term in EXCLUDED_ACCOUNT_TERMS):
