@@ -3,37 +3,51 @@ class RubricProcessor:
     @staticmethod
     def generate_records(course, rubric_service, include_comments=False):
 
-        rubrics = rubric_service.get_course_rubrics(course)
+        assignments = rubric_service.get_assignments_with_rubrics(course)
 
-        # Ignore courses without rubrics
-        if not rubrics:
+        if not assignments:
             return
 
-        for rubric in rubrics:
+        for assignment in assignments:
 
-            rubric_title = getattr(rubric, "title", None)
+            rubric_metadata = getattr(assignment, "rubric", None)
 
-            # Safely retrieve criteria
-            criteria = getattr(rubric, "criteria", []) or []
+            if not rubric_metadata:
+                continue
 
+            rubric_title = getattr(assignment, "name", None)
+
+            # Build criteria lookup from assignment.rubric
             criteria_lookup = {}
 
-            for criterion in criteria:
+            for criterion in rubric_metadata:
                 criteria_lookup[criterion.get("id")] = {
                     "criterion_name": criterion.get("description"),
                     "criterion_description": criterion.get("long_description")
                 }
 
-            # Safely retrieve assessments
-            assessments = getattr(rubric, "assessments", []) or []
+            submissions = rubric_service.get_submission_rubric_data(assignment)
 
-            for assessment in assessments:
+            if not submissions:
+                continue
 
-                assessment_data = assessment.get("data", {})
+            for submission in submissions:
 
-                for criterion_id, criterion_result in assessment_data.items():
+                rubric_assessment = getattr(
+                    submission,
+                    "rubric_assessment",
+                    None
+                )
 
-                    criterion_meta = criteria_lookup.get(criterion_id, {})
+                if not rubric_assessment:
+                    continue
+
+                for criterion_id, criterion_result in rubric_assessment.items():
+
+                    criterion_meta = criteria_lookup.get(
+                        criterion_id,
+                        {}
+                    )
 
                     comment = (
                         criterion_result.get("comments")
