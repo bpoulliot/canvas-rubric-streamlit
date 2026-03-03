@@ -121,24 +121,35 @@ class CourseService:
             global_rate_limiter.wait()
             account = self.client.get_account(account_id)
 
+            # Common filtering arguments
+            base_kwargs = {
+                "state": ["available"],
+                "published": True,
+                "blueprint": False,
+                "with_enrollments": True,
+                "per_page": 100
+            }
+
             if pull_type == "Term":
                 if not term_id:
                     raise ValueError("Term must be selected.")
 
                 courses = account.get_courses(
                     enrollment_term_id=term_id,
-                    state=["available"]
+                    **base_kwargs
                 )
 
             else:
                 courses = account.get_courses(
-                    state=["available"]
+                    **base_kwargs
                 )
 
             return list(courses)
 
         except ResourceDoesNotExist:
-            raise ValueError("Canvas returned 'Not Found'. Verify account access.")
+            raise ValueError(
+                "Canvas returned 'Not Found'. Verify account access."
+            )
 
     # ---------------------------------------------------
     # Course Filtering
