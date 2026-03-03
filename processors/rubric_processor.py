@@ -13,17 +13,19 @@ class RubricProcessor:
 
             rubric_title = getattr(rubric, "title", None)
 
+            # Safely retrieve criteria
+            criteria = getattr(rubric, "criteria", []) or []
+
             criteria_lookup = {}
 
-            rubric_data = getattr(rubric, "data", {})
-
-            for criterion in rubric_data.get("criteria", []):
-                criteria_lookup[criterion["id"]] = {
+            for criterion in criteria:
+                criteria_lookup[criterion.get("id")] = {
                     "criterion_name": criterion.get("description"),
                     "criterion_description": criterion.get("long_description")
                 }
 
-            assessments = rubric_data.get("assessments", [])
+            # Safely retrieve assessments
+            assessments = getattr(rubric, "assessments", []) or []
 
             for assessment in assessments:
 
