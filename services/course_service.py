@@ -1,3 +1,4 @@
+import requests
 from canvasapi.exceptions import ResourceDoesNotExist
 from utils.retry import retry
 from utils.rate_limiter import global_rate_limiter
@@ -32,16 +33,26 @@ class CourseService:
     @retry()
     def get_all_accounts(self):
         """
-        Uses raw Canvas API endpoint:
+        Uses raw REST call to:
         GET /api/v1/manageable_accounts
         """
     
         global_rate_limiter.wait()
     
-        response = self.canvas._requester.request(
-            "GET",
-            "manageable_accounts"
+        base_url = self.client.canvas.base_url
+        api_key = self.client.canvas._Canvas__requester.access_token  # safe access
+    
+        headers = {
+            "Authorization": f"Bearer {api_key}"
+        }
+    
+        response = requests.get(
+            f"{base_url}/api/v1/manageable_accounts",
+            headers=headers
         )
+    
+        if response.status_code != 200:
+            raise ValueError("Failed to retrieve manageable accounts.")
     
         accounts_json = response.json()
     
@@ -51,7 +62,7 @@ class CourseService:
             account = self.canvas.get_account(account_data["id"])
             accounts.append(account)
     
-        # Apply name filtering
+        # Apply filtering
         filtered_accounts = []
     
         for account in accounts:
