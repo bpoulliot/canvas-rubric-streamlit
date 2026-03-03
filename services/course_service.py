@@ -31,21 +31,40 @@ class CourseService:
 
     @retry()
     def get_all_accounts(self):
+        """
+        Uses raw Canvas API endpoint:
+        GET /api/v1/manageable_accounts
+        """
+    
         global_rate_limiter.wait()
-
-        accounts = list(self.canvas.get_manageable_accounts())
-
+    
+        response = self.canvas._requester.request(
+            "GET",
+            "manageable_accounts"
+        )
+    
+        accounts_json = response.json()
+    
+        accounts = []
+    
+        for account_data in accounts_json:
+            account = self.canvas.get_account(account_data["id"])
+            accounts.append(account)
+    
+        # Apply name filtering
         filtered_accounts = []
-
+    
         for account in accounts:
             name_lower = account.name.lower()
+    
             if any(term in name_lower for term in EXCLUDED_ACCOUNT_TERMS):
                 continue
+    
             filtered_accounts.append(account)
-
+    
         def account_sort_key(account):
             name = account.name.lower()
-
+    
             if "_college" in name:
                 group = 0
             elif ": college" in name or ": school" in name or ": cross" in name:
@@ -54,10 +73,11 @@ class CourseService:
                 group = 3
             else:
                 group = 2
-
+    
             return (group, name)
-
+    
         filtered_accounts.sort(key=account_sort_key)
+    
         return filtered_accounts
 
     # ---------------------------------------------------
