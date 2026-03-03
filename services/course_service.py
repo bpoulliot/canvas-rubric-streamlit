@@ -107,10 +107,10 @@ class CourseService:
             account = self.canvas.get_account(account_id)
 
             kwargs = {
-                "state": ["available"],
                 "published": True,
                 "blueprint": False,
-                "per_page": 100
+                "per_page": 100,
+                "with_enrollments": True
             }
 
             if pull_type == "Term":
