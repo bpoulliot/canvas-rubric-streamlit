@@ -285,21 +285,81 @@ if page == "Extraction":
 
 if page == "Visualizations":
 
-    st.title("Rubric Analytics Dashboard")
+    st.title("Rubric Analytics Suite")
 
     if "rubric_df" not in st.session_state:
         st.info("Run an extraction first.")
     else:
 
-        df = st.session_state["rubric_df"]
+        df = st.session_state["rubric_df"].copy()
 
-        if df.empty:
-            st.warning("No rubric data available.")
+        required_cols = ["course_name", "criterion_name", "score"]
+
+        if not all(col in df.columns for col in required_cols):
+            st.error("Dataset missing required columns.")
+        elif df.empty:
+            st.warning("Dataset is empty.")
         else:
 
-            tab1, tab2 = st.tabs(["Heatmap", "Raw Data"])
+            global_mean = df["score"].mean()
+            global_std = df["score"].std()
 
-            with tab1:
+            # =====================================================
+            # TAB STRUCTURE BY DATA TYPE
+            # =====================================================
+
+            tab_glance, tab_course, tab_criterion, tab_variability, tab_comments = st.tabs([
+                "At-a-Glance",
+                "Course Analysis",
+                "Criterion Analysis",
+                "Variability & Diagnostics",
+                "Comments Insights"
+            ])
+
+            # =====================================================
+            # 1️⃣ AT-A-GLANCE TAB
+            # =====================================================
+
+            with tab_glance:
+
+                st.subheader("Executive Snapshot")
+
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Courses", df["course_name"].nunique())
+                col2.metric("Records", len(df))
+                col3.metric("Institutional Mean", round(global_mean, 2))
+                col4.metric("Std Dev", round(global_std, 2))
+
+                st.divider()
+
+                # Score Distribution
+                fig_hist = px.histogram(
+                    df, x="score", nbins=20,
+                    title="Score Distribution"
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+
+                # Course Benchmark (Ranked)
+                course_avg = (
+                    df.groupby("course_name")["score"]
+                    .mean()
+                    .reset_index()
+                    .sort_values("score", ascending=False)
+                )
+                course_avg["Delta"] = course_avg["score"] - global_mean
+
+                fig_bench = px.bar(
+                    course_avg,
+                    x="score",
+                    y="course_name",
+                    orientation="h",
+                    color="Delta",
+                    color_continuous_scale="RdYlGn",
+                    title="Course Benchmark vs Institutional Mean"
+                )
+                st.plotly_chart(fig_bench, use_container_width=True)
+
+                # Heatmap
                 heatmap_data = (
                     df.groupby(["course_name", "criterion_name"])["score"]
                     .mean()
@@ -312,8 +372,159 @@ if page == "Visualizations":
                     values="score"
                 )
 
-                fig = px.imshow(pivot, text_auto=True, aspect="auto")
-                st.plotly_chart(fig, use_container_width=True)
+                fig_heat = px.imshow(
+                    pivot,
+                    text_auto=True,
+                    aspect="auto",
+                    title="Course × Criterion Heatmap"
+                )
+                st.plotly_chart(fig_heat, use_container_width=True)
 
-            with tab2:
-                st.dataframe(df)
+                # =====================================================
+                # Performance Quadrant Plot
+                # =====================================================
+
+                st.subheader("Performance Quadrant")
+
+                course_stats = (
+                    df.groupby("course_name")["score"]
+                    .agg(["mean", "std"])
+                    .reset_index()
+                )
+
+                fig_quad = px.scatter(
+                    course_stats,
+                    x="mean",
+                    y="std",
+                    text="course_name",
+                    title="Mean vs Variability"
+                )
+
+                fig_quad.add_vline(x=global_mean, line_dash="dash")
+                fig_quad.add_hline(y=global_std, line_dash="dash")
+
+                st.plotly_chart(fig_quad, use_container_width=True)
+
+                # =====================================================
+                # Traffic Light Dashboard
+                # =====================================================
+
+                st.subheader("Traffic Light Performance")
+
+                traffic = course_avg.copy()
+
+                def traffic_color(delta):
+                    if delta > global_std * 0.5:
+                        return "🟢"
+                    elif delta < -global_std * 0.5:
+                        return "🔴"
+                    else:
+                        return "🟡"
+
+                traffic["Status"] = traffic["Delta"].apply(traffic_color)
+
+                st.dataframe(
+                    traffic[["course_name", "score", "Status"]],
+                    use_container_width=True
+                )
+
+                # =====================================================
+                # Best-in-Class Toggles
+                # =====================================================
+
+                st.subheader("Best-in-Class Insights")
+
+                show_top = st.toggle("Highlight Top Performing Courses")
+                show_low = st.toggle("Highlight At-Risk Courses")
+
+                if show_top:
+                    top_courses = traffic.nlargest(5, "score")
+                    st.success("Top 5 Courses")
+                    st.dataframe(top_courses)
+
+                if show_low:
+                    low_courses = traffic.nsmallest(5, "score")
+                    st.error("Lowest 5 Courses")
+                    st.dataframe(low_courses)
+
+            # =====================================================
+            # 2️⃣ COURSE ANALYSIS
+            # =====================================================
+
+            with tab_course:
+
+                st.subheader("Course-Level Distribution")
+
+                fig_course_box = px.box(
+                    df,
+                    x="course_name",
+                    y="score",
+                    points="all"
+                )
+                st.plotly_chart(fig_course_box, use_container_width=True)
+
+            # =====================================================
+            # 3️⃣ CRITERION ANALYSIS
+            # =====================================================
+
+            with tab_criterion:
+
+                st.subheader("Average Score by Criterion")
+
+                crit_avg = (
+                    df.groupby("criterion_name")["score"]
+                    .mean()
+                    .reset_index()
+                    .sort_values("score", ascending=False)
+                )
+
+                fig_crit = px.bar(
+                    crit_avg,
+                    x="criterion_name",
+                    y="score"
+                )
+                st.plotly_chart(fig_crit, use_container_width=True)
+
+            # =====================================================
+            # 4️⃣ VARIABILITY & DIAGNOSTICS
+            # =====================================================
+
+            with tab_variability:
+
+                st.subheader("Criterion Variability")
+
+                crit_std = (
+                    df.groupby("criterion_name")["score"]
+                    .std()
+                    .reset_index()
+                )
+
+                fig_std = px.bar(
+                    crit_std,
+                    x="criterion_name",
+                    y="score"
+                )
+                st.plotly_chart(fig_std, use_container_width=True)
+
+            # =====================================================
+            # 5️⃣ COMMENTS INSIGHTS
+            # =====================================================
+
+            with tab_comments:
+
+                if "rubric_comment" in df.columns and df["rubric_comment"].notna().any():
+
+                    st.subheader("Comment Length Distribution")
+
+                    df_comments = df[df["rubric_comment"].notna()].copy()
+                    df_comments["length"] = df_comments["rubric_comment"].str.len()
+
+                    fig_comm = px.histogram(
+                        df_comments,
+                        x="length",
+                        nbins=30
+                    )
+                    st.plotly_chart(fig_comm, use_container_width=True)
+
+                else:
+                    st.info("No rubric comments available.")
