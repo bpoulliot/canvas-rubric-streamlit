@@ -1,76 +1,49 @@
-import re
-
-
 class RubricProcessor:
-
-    @staticmethod
-    def scrub_names(comment, student_names):
-        if not comment:
-            return comment
-
-        for name in student_names:
-            pattern = r"\b" + re.escape(name) + r"\b"
-            comment = re.sub(pattern, "[REDACTED]", comment, flags=re.IGNORECASE)
-
-        return comment
 
     @staticmethod
     def generate_records(course, rubric_service, include_comments=False):
 
-        assignments = rubric_service.get_assignments_with_rubrics(course)
+        rubrics = rubric_service.get_course_rubrics(course)
 
-        if not assignments:
+        # Ignore courses without rubrics
+        if not rubrics:
             return
 
-        # Build student name list for scrubbing
-        student_names = []
-        if include_comments:
-            enrollments = course.get_enrollments(type=["StudentEnrollment"])
-            for e in enrollments:
-                if hasattr(e, "user") and e.user:
-                    name_parts = e.user["name"].split()
-                    student_names.extend(name_parts)
+        for rubric in rubrics:
 
-        for assignment in assignments:
+            rubric_title = getattr(rubric, "title", None)
 
-            rubric_name = assignment.name  # Canvas does not always expose rubric title directly
+            criteria_lookup = {}
 
-            # Build rubric criterion lookup from assignment.rubric
-            rubric_criteria_lookup = {}
-            if hasattr(assignment, "rubric") and assignment.rubric:
-                for criterion in assignment.rubric:
-                    rubric_criteria_lookup[criterion["id"]] = {
-                        "criterion_name": criterion.get("description"),
-                        "criterion_description": criterion.get("long_description")
-                    }
+            rubric_data = getattr(rubric, "data", {})
 
-            submissions = rubric_service.get_active_submissions(assignment)
+            for criterion in rubric_data.get("criteria", []):
+                criteria_lookup[criterion["id"]] = {
+                    "criterion_name": criterion.get("description"),
+                    "criterion_description": criterion.get("long_description")
+                }
 
-            if not submissions:
-                continue
+            assessments = rubric_data.get("assessments", [])
 
-            for submission in submissions:
+            for assessment in assessments:
 
-                rubric_data = submission.rubric_assessment
+                assessment_data = assessment.get("data", {})
 
-                for cid, cdata in rubric_data.items():
+                for criterion_id, criterion_result in assessment_data.items():
 
-                    criterion_meta = rubric_criteria_lookup.get(cid, {})
+                    criterion_meta = criteria_lookup.get(criterion_id, {})
 
-                    comment = None
-                    if include_comments:
-                        comment = cdata.get("comments")
-                        comment = RubricProcessor.scrub_names(
-                            comment,
-                            student_names
-                        )
+                    comment = (
+                        criterion_result.get("comments")
+                        if include_comments
+                        else None
+                    )
 
                     yield {
                         "course_name": course.name,
-                        "assignment_name": assignment.name,
-                        "rubric_name": rubric_name,
+                        "rubric_name": rubric_title,
                         "criterion_name": criterion_meta.get("criterion_name"),
                         "criterion_description": criterion_meta.get("criterion_description"),
-                        "score": cdata.get("points"),
-                        "rubric_comment": comment if include_comments else None
+                        "score": criterion_result.get("points"),
+                        "rubric_comment": comment
                     }
