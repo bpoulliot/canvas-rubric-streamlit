@@ -59,7 +59,6 @@ def run_extraction(course_service, rubric_service,
             pull_type=pull_type,
             term_id=term_id
         )
-        courses = course_service.filter_courses(courses)
 
     total_courses = len(courses)
 
