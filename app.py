@@ -1,394 +1,530 @@
 import streamlit as st
 import pandas as pd
-import requests
-import re
-import io
-import csv
-from canvasapi import Canvas
-from datetime import datetime
+from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from services.canvas_client import CanvasClient
+from services.course_service import CourseService
+from services.rubric_service import RubricService
+from processors.rubric_processor import RubricProcessor
 import plotly.express as px
-from openai import OpenAI
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="Canvas Tools", layout="wide")
 
-# --- PRE-LOGIN PDF DOWNLOAD ---
-st.sidebar.markdown("📄 **Instructions PDF**")
-with open("Canvas_Rubric_Instructions.pdf", "rb") as f:
-    pdf_bytes = f.read()
+st.set_page_config(page_title="Canvas Admin Rubric Extractor", layout="wide")
 
-st.sidebar.download_button(
-    label="Download Canvas Rubric Instructions",
-    data=pdf_bytes,
-    file_name="Canvas_Rubric_Instructions.pdf",
-    mime="application/pdf",
-    key="instructions_pdf"
-)
+page = st.sidebar.radio("Navigation", ["Extraction", "Visualizations"])
 
-# --- HEADER ---
-st.image("COED.PNG", width=300)
-st.title("Canvas Rubric Scraper & Comments Exporter")
-st.markdown(
-    "<h5 style='color: gray;'>This Program is the Property of Mark A. Perkins, Ph.D.</h5>",
-    unsafe_allow_html=True
-)
+# ============================================================
+# Session State Initialization
+# ============================================================
 
-# --- LOGIN ---
-VALID_USERNAME = st.secrets["username"]
-VALID_PASSWORD = st.secrets["password"]
+DEFAULT_STATE = {
+    "connected": False,
+    "canvas_client": None,
+    "accounts": []
+}
 
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
+for key, value in DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-st.sidebar.title("🔒 Login")
-username_input = st.sidebar.text_input("Username")
-password_input = st.sidebar.text_input("Password", type="password")
-login_button = st.sidebar.button("Login")
 
-if login_button:
-    if username_input == VALID_USERNAME and password_input == VALID_PASSWORD:
-        st.session_state["logged_in"] = True
+# ============================================================
+# Utility: Validate Extraction Configuration
+# ============================================================
+
+def validate_configuration(pull_type, account_id, term_id):
+    """
+    Centralized validation guardrail.
+    Prevents future ordering regressions.
+    """
+
+    if pull_type == "Term":
+        return account_id is not None and account_id != 1
     else:
-        st.error("❌ Invalid username or password.")
+        return term_id is not None
 
-if not st.session_state["logged_in"]:
-    st.warning("Please log in to access the app.")
-    st.stop()
 
-# --- UPLOAD TOKENS CSV ---
-token_file = st.file_uploader("Upload CSV with Token, URL, Institution", type=["csv"])
-tokens_list = []
+# ============================================================
+# Extraction Logic
+# ============================================================
 
-if token_file:
-    try:
-        tokens_df = pd.read_csv(token_file).dropna(subset=['Token', 'URL']).drop_duplicates(subset=['Token', 'URL'])
-        tokens_list = tokens_df.to_dict('records')
-        st.success(f"{len(tokens_list)} token(s) loaded.")
-    except Exception as e:
-        st.error(f"Could not read tokens: {e}")
+def run_extraction(course_service, rubric_service,
+                   account_id, pull_type, term_id,
+                   include_comments, max_workers):
 
-# --- TABS ---
-tab_rubric, tab_comments = st.tabs(["📋 Rubric Scraper", "💬 Comments Exporter"])
-
-# =========================
-# TAB 1: RUBRIC SCRAPER
-# =========================
-with tab_rubric:
-    st.subheader("Rubric Analyzer")
-
-    if tokens_list:
-
-        @st.cache_data(show_spinner=False)
-        def fetch_rubric_data(tokens_with_urls):
-            all_data = []
-
-            def term_year(course):
-                try:
-                    if course.start_at:
-                        start_date = datetime.fromisoformat(course.start_at.rstrip("Z"))
-                        month = start_date.month
-                        year = start_date.year
-                        term = "Spring" if 1 <= month <= 4 else "Summer" if 5 <= month <= 7 else "Fall"
-                        academic_year = f"{year}-{year+1}" if term=="Fall" else f"{year-1}-{year}"
-                        return term, academic_year
-                    else:
-                        return "Unknown", "Unknown"
-                except:
-                    return "Unknown", "Unknown"
-
-            for record in tokens_with_urls:
-                token = record['Token']
-                canvas_url = record['URL']
-                institution = record.get('Institution', 'Unknown')
-                try:
-                    canvas = Canvas(canvas_url, token)
-                    courses = list(canvas.get_courses(enrollment_type='teacher', state=['available', 'completed']))
-                    for course in courses:
-                        instructor_list = course.get_users(enrollment_type='teacher')
-                        instructors = ", ".join([i.short_name for i in instructor_list])
-                        term, year = term_year(course)
-                        assignments = course.get_assignments(include=['rubric'])
-                        for assignment in assignments:
-                            if not getattr(assignment, 'rubric', None):
-                                continue
-                            submissions = assignment.get_submissions(include=['rubric_assessment'])
-                            for sub in submissions:
-                                if getattr(sub, 'rubric_assessment', None):
-                                    for setting in assignment.rubric:
-                                        rid = setting['id']
-                                        desc = setting['description']
-                                        score = sub.rubric_assessment.get(rid, {}).get('points', None)
-                                        all_data.append({
-                                            "Institution": institution,
-                                            "Term": term,
-                                            "Year": year,
-                                            "Course": course.name,
-                                            "Instructor": instructors,
-                                            "Assignment": assignment.name,
-                                            "Rubric Item": desc,
-                                            "Score": score,
-                                            "Points Possible": setting.get('points', None),
-                                            "Student ID": sub.user_id
-                                        })
-                except Exception as e:
-                    st.warning(f"Error fetching data for token {token[:6]}: {e}")
-            return pd.DataFrame(all_data)
-
-        # --- FETCH BUTTON ---
-        if st.button("Fetch Rubric Data"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            df_rubric_all = pd.DataFrame()
-            total_tokens = len(tokens_list)
-
-            for i, record in enumerate(tokens_list):
-                status_text.text(f"Processing token {i+1}/{total_tokens} ({record.get('Institution', 'Unknown')})...")
-                df_part = fetch_rubric_data([record])
-                df_rubric_all = pd.concat([df_rubric_all, df_part], ignore_index=True)
-                progress_bar.progress(int((i+1)/total_tokens*100))
-
-            progress_bar.empty()
-            status_text.empty()
-
-            if df_rubric_all.empty:
-                st.info("No rubric data found.")
-            else:
-                st.session_state['df_rubric'] = df_rubric_all
-                st.success("✅ Rubric data fetched successfully!")
-
-    # --- FILTERS AND VISUALIZATION ---
-    if 'df_rubric' in st.session_state:
-        df_rubric = st.session_state['df_rubric'].copy()
-
-        # Filters
-        filtered_df = df_rubric.copy()
-        for col, label in [('Institution', "Select Institution(s)"),
-                           ('Year', "Select Academic Year(s)"),
-                           ('Term', "Select Term(s)"),
-                           ('Course', "Select Course(s)"),
-                           ('Assignment', "Select Assignment(s)"),
-                           ('Instructor', "Select Instructor(s)")]:
-            options = st.multiselect(label, sorted(filtered_df[col].unique()))
-            if options:
-                filtered_df = filtered_df[filtered_df[col].isin(options)]
-
-        # --- AGGREGATED DATA ---
-        aggregated_df = (
-            filtered_df.groupby(['Institution', 'Year', 'Term', 'Course', 'Instructor', 'Assignment', 'Rubric Item'])
-            .agg(
-                Avg_Score=('Score', 'mean'),
-                Max_Score=('Score', 'max'),
-                Min_Score=('Score', 'min'),
-                Count=('Student ID', 'nunique')
-            ).reset_index()
+    with st.spinner("Retrieving courses..."):
+        courses = course_service.get_courses(
+            account_id=account_id,
+            pull_type=pull_type,
+            term_id=term_id
         )
 
-        # --- TABS FOR VISUALS ---
-        tab1_r, tab2_r, tab3_r = st.tabs([
-            "📋 Data Table", 
-            "📊 Average Scores", 
-            "🧮 Score Frequency"
-        ])
+    total_courses = len(courses)
 
-        with tab1_r:
-            st.dataframe(filtered_df, use_container_width=True)
-            st.download_button(
-                "📥 Download Filtered Data as CSV",
-                data=filtered_df.to_csv(index=False).encode('utf-8'),
-                file_name='filtered_rubric_data.csv',
-                mime='text/csv'
-            )
+    if total_courses == 0:
+        st.warning("No eligible courses found.")
+        return None
 
-        with tab2_r:
-            st.subheader("🎯 Average Scores Visualization")
-            st.download_button(
-                "📥 Download Aggregated Data as CSV",
-                data=aggregated_df.to_csv(index=False).encode('utf-8'),
-                file_name='aggregated_rubric_data.csv',
-                mime='text/csv'
-            )
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-            group_by = st.selectbox("Group by", ['Institution', 'Rubric Item', 'Course', 'Instructor'])
-            if not aggregated_df.empty:
-                avg_scores = aggregated_df.groupby(group_by)['Avg_Score'].mean().sort_values().reset_index()
+    records = []
+    completed = 0
 
-                fig1 = px.bar(
-                    avg_scores, x=group_by, y='Avg_Score',
-                    title=f"Average Scores by {group_by}",
-                    labels={group_by: group_by, 'Avg_Score': 'Average Score'},
-                    text='Avg_Score'
-                )
-                fig1.update_traces(texttemplate='%{text:.2f}', textposition='outside')
-                fig1.update_layout(xaxis_tickangle=45, margin=dict(l=40, r=40, t=80, b=100), height=450)
-                st.plotly_chart(fig1, use_container_width=True)
+    with st.spinner("Pulling rubrics and submissions..."):
 
-                fig2 = px.box(aggregated_df, x='Avg_Score', y=group_by, points="all", title=f"Score Distribution by {group_by}")
-                fig2.update_layout(margin=dict(l=40, r=40, t=50, b=100), height=450)
-                st.plotly_chart(fig2, use_container_width=True)
-
-        with tab3_r:
-            long_agg_df = (
-                filtered_df.groupby(['Rubric Item', 'Score'])
-                .agg(Count=('Student ID', 'nunique'))
-                .reset_index()
-            )
-            total_per_criterion = long_agg_df.groupby("Rubric Item")["Count"].transform("sum")
-            long_agg_df['Percentage'] = (long_agg_df['Count'] / total_per_criterion * 100).round(1)
-            long_agg_df['Label'] = long_agg_df.apply(lambda row: f"{row['Count']} ({row['Percentage']}%)", axis=1)
-
-            MAX_FACETS = 12
-            num_rubric_items = long_agg_df['Rubric Item'].nunique()
-
-            if long_agg_df.empty:
-                st.info("No data matches the selected filters for visualization.")
-            elif num_rubric_items > MAX_FACETS:
-                st.warning(f"⚠️ {num_rubric_items} rubric items selected — too many to display. Filter further to <12.")
-            else:
-                facet_by = st.selectbox("Facet by", ["Rubric Item", "Institution"])
-                try:
-                    if facet_by == "Rubric Item":
-                        ranges = long_agg_df.groupby("Rubric Item")["Score"].agg(['min', 'max']).reset_index()
-                        ranges["Facet Title"] = ranges.apply(lambda row: f"{row['Rubric Item']} ({row['min']}-{row['max']})", axis=1)
-                        long_df_labeled = long_agg_df.merge(ranges[['Rubric Item', 'Facet Title']], on='Rubric Item')
-                        facet_col = "Facet Title"
-                    else:
-                        long_df_labeled = (
-                            filtered_df.groupby(["Institution", "Score"])["Student ID"]
-                            .nunique()
-                            .reset_index(name="Count")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    lambda c=c: list(
+                        RubricProcessor.generate_records(
+                            c,
+                            rubric_service,
+                            include_comments=include_comments
                         )
-                        total_per_inst = long_df_labeled.groupby("Institution")["Count"].transform("sum")
-                        long_df_labeled["Percentage"] = (long_df_labeled["Count"] / total_per_inst * 100).round(1)
-                        long_df_labeled["Label"] = long_df_labeled.apply(lambda row: f"{row['Count']} ({row['Percentage']}%)", axis=1)
-                        facet_col = "Institution"
-
-                    fig3 = px.bar(
-                        long_df_labeled, x="Score", y="Count",
-                        facet_col=facet_col, facet_col_wrap=3,
-                        text="Label", hover_data=["Label"],
-                        title=f"🎓 Distinct Student Scores by {facet_by}",
-                        labels={"Score": "Score Value", "Count": "Number of Students"},
-                        height=600
                     )
-                    fig3.update_xaxes(matches=None)
-                    fig3.update_traces(texttemplate="%{text}", textposition='auto')
-                    fig3.update_layout(margin=dict(l=40, r=40, t=80, b=100), showlegend=False)
-                    st.plotly_chart(fig3, use_container_width=True)
+                ): c for c in courses
+            }
 
-                    st.download_button(
-                        "📥 Download Aggregated Data as CSV",
-                        data=long_agg_df.to_csv(index=False).encode('utf-8'),
-                        file_name='frequency_rubric_data.csv',
-                        mime='text/csv'
-                    )
-                except ValueError as e:
-                    st.warning(f"⚠️ {e}")
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    records.extend(result)
+
+                completed += 1
+                progress_bar.progress(completed / total_courses)
+                status_text.text(
+                    f"Processed {completed} of {total_courses} courses"
+                )
+
+    return pd.DataFrame(records)
+
+
+# ============================================================
+# EXTRACTION PAGE
+# ============================================================
+
+if page == "Extraction":
+
+    st.title("Canvas Admin Rubric Extractor")
+
+    # ========================================================
+    # CONNECTION VIEW
+    # ========================================================
+
+    if not st.session_state.connected:
+
+        base_url = st.text_input("Canvas Base URL")
+        api_key = st.text_input("Paste Admin API Token", type="password")
+
+        if st.button("Connect to Canvas"):
+
+            if not base_url or not api_key:
+                st.error("Base URL and API Token required.")
+            else:
+                try:
+                    canvas_client = CanvasClient(base_url, api_key)
+                    canvas_client.get_account(1)
+
+                    course_service = CourseService(canvas_client)
+                    accounts = course_service.get_all_accounts()
+
+                    st.session_state.canvas_client = canvas_client
+                    st.session_state.accounts = accounts
+                    st.session_state.connected = True
+
+                    st.rerun()
+
                 except Exception as e:
-                    st.error(f"🚨 Error rendering score frequency chart: {e}")
+                    st.error(f"Connection failed: {str(e)}")
 
-# =========================
-# TAB 2: COMMENTS EXPORTER
-# =========================
-with tab_comments:
-    st.subheader("Comments Exporter")
-    st.image("COED.PNG", width=300)
-    st.markdown("### Download comments from your courses and export to a CSV")
+    # ========================================================
+    # EXTRACTION VIEW
+    # ========================================================
 
-    if tokens_list:
-        institution = st.selectbox("Select Institution", [r.get('Institution','Unknown') for r in tokens_list])
-        inst_row = next(r for r in tokens_list if r.get('Institution')==institution)
-        base_url = inst_row['URL'].rstrip("/") + "/api/v1"
-        token = inst_row['Token']
+    else:
 
-        # Helper functions
-        def paginate_request(url, token):
-            headers = {"Authorization": f"Bearer {token}"}
-            all_results = []
-            while url:
-                r = requests.get(url, headers=headers)
-                r.raise_for_status()
-                all_results.extend(r.json())
-                url = r.links["next"]["url"] if "next" in r.links else None
-            return all_results
+        canvas_client = st.session_state.canvas_client
+        course_service = CourseService(canvas_client)
 
-        def get_courses(base_url, token):
-            url = f"{base_url}/courses?per_page=100"
-            return paginate_request(url, token)
+        # Disconnect guardrail
+        col1, col2 = st.columns([8, 2])
+        with col2:
+            if st.button("Disconnect"):
+                for key in DEFAULT_STATE:
+                    st.session_state[key] = DEFAULT_STATE[key]
+                st.rerun()
 
-        def get_assignments(base_url, token, course_id):
-            url = f"{base_url}/courses/{course_id}/assignments?per_page=100"
-            return paginate_request(url, token)
+        # ----------------------------------------------------
+        # Input Controls (Defined FIRST)
+        # ----------------------------------------------------
 
-        def get_student_names(base_url, token, course_id):
-            url = f"{base_url}/courses/{course_id}/enrollments?type[]=StudentEnrollment&per_page=100"
-            enrollments = paginate_request(url, token)
-            return [e["user"]["name"] for e in enrollments]
+        pull_type = st.selectbox(
+            "Pull Courses By",
+            ["Term", "Entire Account"]
+        )
 
-        def get_instructor_ids(base_url, token, course_id):
-            url = f"{base_url}/courses/{course_id}/enrollments?type[]=TeacherEnrollment&per_page=100"
-            enrollments = paginate_request(url, token)
-            return [e["user"]["id"] for e in enrollments]
+        account_dict = {
+            f"{a.name} (ID: {a.id})": a.id
+            for a in st.session_state.accounts
+        }
 
-        def get_comments(base_url, token, course_id, assignment_id):
-            url = f"{base_url}/courses/{course_id}/assignments/{assignment_id}/submissions?include[]=submission_comments&per_page=100"
-            return paginate_request(url, token)
-            
-        def clean_comment(text, student_names):
-            cleaned = text
-            for name in student_names:
-                # Replace full name (case-insensitive)
-                cleaned = re.sub(re.escape(name), "STUDENT", cleaned, flags=re.IGNORECASE)
-                # Replace first and last name separately if needed
-                for part in name.split():
-                    cleaned = re.sub(rf"\b{re.escape(part)}\b", "STUDENT", cleaned, flags=re.IGNORECASE)
-            return cleaned
+        selected_account_label = st.selectbox(
+            "Select Account or Subaccount",
+            list(account_dict.keys())
+        )
 
-        # Course + Assignment selection
-        courses = get_courses(base_url, token)
-        course_dict = {c["name"]: c["id"] for c in courses if c.get("name") and c.get("id")}
-        course_name = st.selectbox("Select Course", list(course_dict.keys()))
-        course_id = course_dict[course_name]
+        selected_account_id = account_dict[selected_account_label]
 
-        assignments = get_assignments(base_url, token, course_id)
-        assignment_dict = {a["name"]: a["id"] for a in assignments if a.get("name") and a.get("id")}
-        assignment_name = st.selectbox("Select Assignment", list(assignment_dict.keys()))
-        assignment_id = assignment_dict[assignment_name]
+        terms = course_service.get_root_terms()
 
-        if st.button("Pull Comments"):
-            student_names = get_student_names(base_url, token, course_id)
-            instructor_ids = get_instructor_ids(base_url, token, course_id)
-            submissions = get_comments(base_url, token, course_id, assignment_id)
+        EXCLUDED_TERM_NAMES = [
+            "permanent term",
+            "default term",
+            "sandboxes for faculty",
+            "summer 2017 pilot courses",
+            "qm reviews"
+        ]
 
-            rows = []
-            for sub in submissions:
-                for c in sub.get("submission_comments", []):
-                    raw = c["comment"]
-                    cleaned = clean_comment(raw, student_names)
-                    author_id = c.get("author_id")
-                    role = "Instructor" if author_id in instructor_ids else "Student"
-                    rows.append({
-                        "student_id": sub.get("user_id"),
-                        "author_id": author_id,
-                        "role": role,
-                        "raw_comment": raw,
-                        "cleaned_comment": cleaned
-                    })
+        filtered_terms = [
+            t for t in terms
+            if t.name.lower() not in EXCLUDED_TERM_NAMES
+        ]
 
-            df_comments = pd.DataFrame(rows)
-            st.dataframe(df_comments)
+        def sis_sort_key(term):
+            sis_id = getattr(term, "sis_term_id", None)
+            if sis_id and str(sis_id).isdigit():
+                return (0, -int(sis_id))
+            return (1, str(sis_id))
 
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                df_comments.to_excel(writer, index=False, sheet_name='Comments')
-            
-            excel_data = excel_buffer.getvalue()
-           
+        filtered_terms.sort(key=sis_sort_key)
 
-            st.download_button(
-                "Download Comments as Excel",
-                data=excel_data,
-                file_name=f"{course_name}_{assignment_name}_comments.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"  
+        term_dict = {
+            f"{t.name} (SIS ID: {getattr(t,'sis_term_id',None)})": t.id
+            for t in filtered_terms
+        }
+
+        selected_term_label = st.selectbox(
+            "Select Enrollment Term",
+            list(term_dict.keys())
+        )
+
+        selected_term_id = term_dict[selected_term_label]
+
+        # ----------------------------------------------------
+        # Validation (AFTER inputs defined)
+        # ----------------------------------------------------
+
+        valid_configuration = validate_configuration(
+            pull_type,
+            selected_account_id,
+            selected_term_id
+        )
+
+        if pull_type == "Term" and selected_account_id == 1:
+            st.warning(
+                "Pull by Term requires selecting an account other than root (ID = 1)."
             )
 
-            
+        if pull_type == "Entire Account" and not selected_term_id:
+            st.warning(
+                "Pull by Entire Account requires selecting an Enrollment Term."
+            )
+
+        include_comments = False
+
+        if pull_type == "Term":
+            include_comments = st.toggle(
+                "Pull Rubric Comments",
+                value=False
+            )
+
+        max_workers = st.slider("Parallel Workers", 2, 20, 10)
+
+        # ----------------------------------------------------
+        # Run Extraction
+        # ----------------------------------------------------
+
+        if not valid_configuration:
+            st.warning("Complete required selections before running extraction.")
+
+        if st.button("Run Extraction", disabled=not valid_configuration):
+
+            rubric_service = RubricService()
+
+            df = run_extraction(
+                course_service,
+                rubric_service,
+                selected_account_id,
+                pull_type,
+                selected_term_id,
+                include_comments,
+                max_workers
+            )
+
+            if df is not None and not df.empty:
+
+                st.session_state["rubric_df"] = df
+
+                st.success("Extraction complete.")
+
+                st.download_button(
+                    "Download CSV",
+                    df.to_csv(index=False).encode("utf-8"),
+                    file_name="canvas_admin_rubrics.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("Extraction completed but no rubric data was found.")
+
+
+# ============================================================
+# VISUALIZATIONS PAGE
+# ============================================================
+
+if page == "Visualizations":
+
+    st.title("Rubric Analytics Suite")
+
+    if "rubric_df" not in st.session_state:
+        st.info("Run an extraction first.")
+    else:
+
+        df = st.session_state["rubric_df"].copy()
+
+        required_cols = ["course_name", "criterion_name", "score"]
+
+        if not all(col in df.columns for col in required_cols):
+            st.error("Dataset missing required columns.")
+        elif df.empty:
+            st.warning("Dataset is empty.")
+        else:
+
+            global_mean = df["score"].mean()
+            global_std = df["score"].std()
+
+            # =====================================================
+            # TAB STRUCTURE BY DATA TYPE
+            # =====================================================
+
+            tab_glance, tab_course, tab_criterion, tab_variability, tab_comments = st.tabs([
+                "At-a-Glance",
+                "Course Analysis",
+                "Criterion Analysis",
+                "Variability & Diagnostics",
+                "Comments Insights"
+            ])
+
+            # =====================================================
+            # 1️⃣ AT-A-GLANCE TAB
+            # =====================================================
+
+            with tab_glance:
+
+                st.subheader("Executive Snapshot")
+
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Courses", df["course_name"].nunique())
+                col2.metric("Records", len(df))
+                col3.metric("Institutional Mean", round(global_mean, 2))
+                col4.metric("Std Dev", round(global_std, 2))
+
+                st.divider()
+
+                # Score Distribution
+                fig_hist = px.histogram(
+                    df, x="score", nbins=20,
+                    title="Score Distribution"
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+
+                # Course Benchmark (Ranked)
+                course_avg = (
+                    df.groupby("course_name")["score"]
+                    .mean()
+                    .reset_index()
+                    .sort_values("score", ascending=False)
+                )
+                course_avg["Delta"] = course_avg["score"] - global_mean
+
+                fig_bench = px.bar(
+                    course_avg,
+                    x="score",
+                    y="course_name",
+                    orientation="h",
+                    color="Delta",
+                    color_continuous_scale="RdYlGn",
+                    title="Course Benchmark vs Institutional Mean"
+                )
+                st.plotly_chart(fig_bench, use_container_width=True)
+
+                # Heatmap
+                heatmap_data = (
+                    df.groupby(["course_name", "criterion_name"])["score"]
+                    .mean()
+                    .reset_index()
+                )
+
+                pivot = heatmap_data.pivot(
+                    index="course_name",
+                    columns="criterion_name",
+                    values="score"
+                )
+
+                fig_heat = px.imshow(
+                    pivot,
+                    text_auto=True,
+                    aspect="auto",
+                    title="Course × Criterion Heatmap"
+                )
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+                # =====================================================
+                # Performance Quadrant Plot
+                # =====================================================
+
+                st.subheader("Performance Quadrant")
+
+                course_stats = (
+                    df.groupby("course_name")["score"]
+                    .agg(["mean", "std"])
+                    .reset_index()
+                )
+
+                fig_quad = px.scatter(
+                    course_stats,
+                    x="mean",
+                    y="std",
+                    text="course_name",
+                    title="Mean vs Variability"
+                )
+
+                fig_quad.add_vline(x=global_mean, line_dash="dash")
+                fig_quad.add_hline(y=global_std, line_dash="dash")
+
+                st.plotly_chart(fig_quad, use_container_width=True)
+
+                # =====================================================
+                # Traffic Light Dashboard
+                # =====================================================
+
+                st.subheader("Traffic Light Performance")
+
+                traffic = course_avg.copy()
+
+                def traffic_color(delta):
+                    if delta > global_std * 0.5:
+                        return "🟢"
+                    elif delta < -global_std * 0.5:
+                        return "🔴"
+                    else:
+                        return "🟡"
+
+                traffic["Status"] = traffic["Delta"].apply(traffic_color)
+
+                st.dataframe(
+                    traffic[["course_name", "score", "Status"]],
+                    use_container_width=True
+                )
+
+                # =====================================================
+                # Best-in-Class Toggles
+                # =====================================================
+
+                st.subheader("Best-in-Class Insights")
+
+                show_top = st.toggle("Highlight Top Performing Courses")
+                show_low = st.toggle("Highlight At-Risk Courses")
+
+                if show_top:
+                    top_courses = traffic.nlargest(5, "score")
+                    st.success("Top 5 Courses")
+                    st.dataframe(top_courses)
+
+                if show_low:
+                    low_courses = traffic.nsmallest(5, "score")
+                    st.error("Lowest 5 Courses")
+                    st.dataframe(low_courses)
+
+            # =====================================================
+            # 2️⃣ COURSE ANALYSIS
+            # =====================================================
+
+            with tab_course:
+
+                st.subheader("Course-Level Distribution")
+
+                fig_course_box = px.box(
+                    df,
+                    x="course_name",
+                    y="score",
+                    points="all"
+                )
+                st.plotly_chart(fig_course_box, use_container_width=True)
+
+            # =====================================================
+            # 3️⃣ CRITERION ANALYSIS
+            # =====================================================
+
+            with tab_criterion:
+
+                st.subheader("Average Score by Criterion")
+
+                crit_avg = (
+                    df.groupby("criterion_name")["score"]
+                    .mean()
+                    .reset_index()
+                    .sort_values("score", ascending=False)
+                )
+
+                fig_crit = px.bar(
+                    crit_avg,
+                    x="criterion_name",
+                    y="score"
+                )
+                st.plotly_chart(fig_crit, use_container_width=True)
+
+            # =====================================================
+            # 4️⃣ VARIABILITY & DIAGNOSTICS
+            # =====================================================
+
+            with tab_variability:
+
+                st.subheader("Criterion Variability")
+
+                crit_std = (
+                    df.groupby("criterion_name")["score"]
+                    .std()
+                    .reset_index()
+                )
+
+                fig_std = px.bar(
+                    crit_std,
+                    x="criterion_name",
+                    y="score"
+                )
+                st.plotly_chart(fig_std, use_container_width=True)
+
+            # =====================================================
+            # 5️⃣ COMMENTS INSIGHTS
+            # =====================================================
+
+            with tab_comments:
+
+                if "rubric_comment" in df.columns and df["rubric_comment"].notna().any():
+
+                    st.subheader("Comment Length Distribution")
+
+                    df_comments = df[df["rubric_comment"].notna()].copy()
+                    df_comments["length"] = df_comments["rubric_comment"].str.len()
+
+                    fig_comm = px.histogram(
+                        df_comments,
+                        x="length",
+                        nbins=30
+                    )
+                    st.plotly_chart(fig_comm, use_container_width=True)
+
+                else:
+                    st.info("No rubric comments available.")
